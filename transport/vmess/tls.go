@@ -10,18 +10,20 @@ import (
 	tlsC "github.com/metacubex/mihomo/component/tls"
 
 	"github.com/metacubex/tls"
+	utls "github.com/metacubex/utls"
 )
 
 type TLSConfig struct {
-	Host              string
-	SkipCertVerify    bool
-	FingerPrint       string
-	Certificate       string
-	PrivateKey        string
-	ClientFingerprint string
-	NextProtos        []string
-	ECH               *ech.Config
-	Reality           *tlsC.RealityConfig
+	Host                 string
+	SkipCertVerify       bool
+	FingerPrint          string
+	Certificate          string
+	PrivateKey           string
+	ClientFingerprint    string
+	NextProtos           []string
+	ECH                  *ech.Config
+	Reality              *tlsC.RealityConfig
+	DisableRenegotiation bool
 }
 
 func (cfg *TLSConfig) ToStdConfig() (*tls.Config, error) {
@@ -53,6 +55,19 @@ func StreamTLSConn(ctx context.Context, conn net.Conn, cfg *TLSConfig) (net.Conn
 			return nil, err
 		}
 		tlsConn := tlsC.UClient(conn, tlsConfig, clientFingerprint)
+		if cfg.DisableRenegotiation {
+			if err = tlsConn.BuildHandshakeState(); err != nil {
+				return nil, err
+			}
+			for index, extension := range tlsConn.Extensions {
+				if _, ok := extension.(*utls.RenegotiationInfoExtension); ok {
+					// Preserve the browser ClientHello bytes without enabling legacy TLS renegotiation,
+					// which disables ExportKeyingMaterial in uTLS.
+					tlsConn.Extensions[index] = &utls.GenericExtension{Id: 0xff01, Data: []byte{0}}
+				}
+			}
+			tlsConfig.Renegotiation = utls.RenegotiateNever
+		}
 		err = tlsConn.HandshakeContext(ctx)
 		if err != nil {
 			return nil, err
