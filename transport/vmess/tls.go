@@ -14,24 +14,26 @@ import (
 	"github.com/metacubex/mihomo/transport/tlsmirror"
 
 	"github.com/metacubex/tls"
+	utls "github.com/metacubex/utls"
 )
 
 type TLSConfig struct {
-	Host              string
-	SkipCertVerify    bool
-	NameCertVerify    string
-	FingerPrint       string
-	Certificate       string
-	PrivateKey        string
-	ClientFingerprint string
-	NextProtos        []string
-	ECH               *ech.Config
-	ShadowTLS         *shadowtls.Config
-	Restls            *restls.Config
-	JLS               *jls.Config
-	Reality           *tlsC.RealityConfig
-	TLSMirror         *tlsmirror.Config
-	TLSMirrorDialer   tlsmirror.EnrollmentDialer
+	Host                 string
+	SkipCertVerify       bool
+	NameCertVerify       string
+	FingerPrint          string
+	Certificate          string
+	PrivateKey           string
+	ClientFingerprint    string
+	NextProtos           []string
+	ECH                  *ech.Config
+	ShadowTLS            *shadowtls.Config
+	Restls               *restls.Config
+	JLS                  *jls.Config
+	Reality              *tlsC.RealityConfig
+	TLSMirror            *tlsmirror.Config
+	TLSMirrorDialer      tlsmirror.EnrollmentDialer
+	DisableRenegotiation bool
 }
 
 func (cfg *TLSConfig) ToStdConfig() (*tls.Config, error) {
@@ -121,6 +123,19 @@ func StreamTLSConn(ctx context.Context, conn net.Conn, cfg *TLSConfig) (net.Conn
 			return nil, err
 		}
 		tlsConn := tlsC.UClient(conn, tlsConfig, clientFingerprint)
+		if cfg.DisableRenegotiation {
+			if err = tlsConn.BuildHandshakeState(); err != nil {
+				return nil, err
+			}
+			for index, extension := range tlsConn.Extensions {
+				if _, ok := extension.(*utls.RenegotiationInfoExtension); ok {
+					// Preserve the browser ClientHello bytes without enabling legacy TLS renegotiation,
+					// which disables ExportKeyingMaterial in uTLS.
+					tlsConn.Extensions[index] = &utls.GenericExtension{Id: 0xff01, Data: []byte{0}}
+				}
+			}
+			tlsConfig.Renegotiation = utls.RenegotiateNever
+		}
 		err = tlsConn.HandshakeContext(ctx)
 		if err != nil {
 			return nil, err

@@ -174,6 +174,13 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		proxy, err = outbound.NewAnyTLS(*anytlsOption)
+	case "artx":
+		artxOption := &outbound.ArtXOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, artxOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewArtX(*artxOption)
 	case "sudoku":
 		sudokuOption := &outbound.SudokuOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, sudokuOption)
