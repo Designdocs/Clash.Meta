@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,6 +32,8 @@ type Conn struct {
 	writeMu     sync.Mutex
 	writeDone   bool
 	closeOnce   sync.Once
+	localClose  atomic.Bool
+	failureOnce sync.Once
 	peerFin     bool
 	peerFinMu   sync.Mutex
 }
@@ -95,6 +98,7 @@ func (connection *Conn) CloseWrite() (err error) {
 }
 
 func (connection *Conn) Close() error {
+	connection.localClose.Store(true)
 	connection.cancel()
 	connection.reader.abort(net.ErrClosed)
 	var closeErr error
@@ -113,6 +117,7 @@ func (connection *Conn) readLoop() {
 				connection.finishAfterPeerFIN()
 				return
 			}
+			connection.recordTransportFailure()
 			connection.abort(err)
 			return
 		}
@@ -167,6 +172,13 @@ func (connection *Conn) readLoop() {
 			// Unknown frames are ignored for forward compatibility.
 		}
 	}
+}
+
+func (connection *Conn) recordTransportFailure() {
+	if connection.localClose.Load() {
+		return
+	}
+	connection.failureOnce.Do(recordUnexpectedDisconnect)
 }
 
 func (connection *Conn) replenish(increment uint32) error {

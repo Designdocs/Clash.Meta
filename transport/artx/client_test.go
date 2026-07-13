@@ -80,6 +80,46 @@ func TestArtXTLSHandshakeAndConnection(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatsCountUnexpectedTransportClose(t *testing.T) {
+	unexpectedDisconnects.Store(0)
+	client, server := net.Pipe()
+	connection := NewConn(client)
+
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Read(make([]byte, 1)); err == nil {
+		t.Fatal("expected transport close to fail the ArtX connection")
+	}
+
+	stats := RuntimeStatsSnapshot()
+	if stats.UnexpectedDisconnects != 1 {
+		t.Fatalf("unexpected disconnects = %d, want 1", stats.UnexpectedDisconnects)
+	}
+}
+
+func TestRuntimeStatsIgnoreLocalClose(t *testing.T) {
+	unexpectedDisconnects.Store(0)
+	client, server := net.Pipe()
+	connection := NewConn(client)
+
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-connection.readDone:
+	case <-time.After(time.Second):
+		t.Fatal("ArtX read loop did not stop")
+	}
+	if stats := RuntimeStatsSnapshot(); stats.UnexpectedDisconnects != 0 {
+		t.Fatalf("unexpected disconnects = %d, want 0", stats.UnexpectedDisconnects)
+	}
+}
+
 func TestArtXRejectsTLS12(t *testing.T) {
 	clientRaw, serverRaw := net.Pipe()
 	serverDone := make(chan error, 1)
