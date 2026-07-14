@@ -432,11 +432,13 @@ func TestArtXWriteDeadlineInterruptsWindowWait(t *testing.T) {
 func TestArtXTransportRejectsInvalidProfileAndFingerprint(t *testing.T) {
 	tests := []struct {
 		name        string
+		profileName string
 		profile     uint32
 		fingerprint string
 		want        string
 	}{
-		{name: "profile version", profile: 2, fingerprint: "chrome", want: "profile"},
+		{name: "profile version", profileName: "balanced", profile: 3, fingerprint: "chrome", want: "profile"},
+		{name: "profile v2 mode", profileName: "web", profile: 2, fingerprint: "chrome", want: "balanced"},
 		{name: "blank fingerprint", profile: 1, fingerprint: " ", want: "fingerprint"},
 		{name: "invalid fingerprint", profile: 1, fingerprint: "artx", want: "fingerprint"},
 	}
@@ -447,7 +449,7 @@ func TestArtXTransportRejectsInvalidProfileAndFingerprint(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
 			_, err := DialContext(ctx, client, ClientConfig{
-				Password: "secret", ProfileVersion: test.profile,
+				Password: "secret", Profile: test.profileName, ProfileVersion: test.profile,
 				TLSConfig: &vmess.TLSConfig{Host: "example.com", SkipCertVerify: true, ClientFingerprint: test.fingerprint},
 			}, Destination{Host: "example.com", Port: 443})
 			if err == nil || !bytes.Contains([]byte(err.Error()), []byte(test.want)) {
