@@ -15,13 +15,18 @@ import (
 )
 
 const (
-	exporterLabel  = "EXPORTER-artx-auth-v1"
-	exporterLength = 32
-	bucketSeconds  = int64(60)
+	exporterLabel                    = "EXPORTER-artx-auth-v1"
+	exporterLength                   = 32
+	bucketSeconds                    = int64(60)
+	earlyRecordProfileVersion        = uint32(2)
+	earlyRecordPlainSettingsLength   = 24
+	earlyRecordGreasedSettingsLength = 30
+	earlyRecordPaddingLength         = 14
 )
 
 type ClientConfig struct {
 	Password       string
+	Profile        string
 	ProfileVersion uint32
 	TLSConfig      *vmess.TLSConfig
 }
@@ -33,8 +38,8 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	if strings.TrimSpace(config.Password) == "" {
 		return nil, errors.New("artx password is required")
 	}
-	if config.ProfileVersion != 1 {
-		return nil, fmt.Errorf("artx unsupported profile version: %d", config.ProfileVersion)
+	if err := validateClientProfile(config.Profile, config.ProfileVersion); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(config.TLSConfig.ClientFingerprint) == "" {
 		return nil, errors.New("artx client fingerprint is required")
@@ -79,7 +84,7 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 		return nil, err
 	}
 
-	serverSettings, err := readServerSettings(tlsConnection)
+	serverSettings, err := readServerSettings(tlsConnection, config.ProfileVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -101,18 +106,60 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	return NewConn(tlsConnection), nil
 }
 
-func readServerSettings(reader net.Conn) (Settings, error) {
+func readServerSettings(reader net.Conn, profileVersion uint32) (Settings, error) {
 	for {
 		frame, err := ReadFrame(reader)
 		if err != nil {
 			return Settings{}, err
 		}
 		if frame.Type == FrameSettings {
-			return ParseSettings(frame.Payload)
+			settings, err := ParseSettings(frame.Payload)
+			if err != nil {
+				return Settings{}, err
+			}
+			if err := validateServerSettingsFlight(reader, profileVersion, len(frame.Payload)); err != nil {
+				return Settings{}, err
+			}
+			return settings, nil
 		}
 		if knownFrame(frame.Type) {
 			return Settings{}, errors.New("artx server SETTINGS required before stream frames")
 		}
+	}
+}
+
+func validateServerSettingsFlight(reader net.Conn, profileVersion uint32, settingsLength int) error {
+	if profileVersion != earlyRecordProfileVersion {
+		return nil
+	}
+	switch settingsLength {
+	case earlyRecordGreasedSettingsLength:
+		return nil
+	case earlyRecordPlainSettingsLength:
+		padding, err := ReadFrame(reader)
+		if err != nil {
+			return err
+		}
+		if padding.Type != FramePadding || padding.StreamID != 0 || len(padding.Payload) != earlyRecordPaddingLength {
+			return errors.New("artx profile version 2 padding frame is invalid")
+		}
+		return nil
+	default:
+		return fmt.Errorf("artx profile version 2 SETTINGS length is %d", settingsLength)
+	}
+}
+
+func validateClientProfile(profile string, profileVersion uint32) error {
+	switch profileVersion {
+	case 1:
+		return nil
+	case earlyRecordProfileVersion:
+		if profile != "balanced" {
+			return errors.New("artx profile version 2 requires the balanced profile")
+		}
+		return nil
+	default:
+		return fmt.Errorf("artx unsupported profile version: %d", profileVersion)
 	}
 }
 

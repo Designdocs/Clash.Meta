@@ -49,8 +49,11 @@ func NewArtX(option ArtXOption) (*ArtX, error) {
 	if option.Profile != "balanced" && option.Profile != "web" && option.Profile != "media" && option.Profile != "realtime" {
 		return nil, fmt.Errorf("unsupported artx profile: %s", option.Profile)
 	}
-	if option.ProfileVersion != 1 {
+	if option.ProfileVersion < 1 || option.ProfileVersion > 2 {
 		return nil, fmt.Errorf("unsupported artx profile-version: %d", option.ProfileVersion)
+	}
+	if option.ProfileVersion == 2 && option.Profile != "balanced" {
+		return nil, errors.New("artx profile-version 2 requires the balanced profile")
 	}
 	if strings.TrimSpace(option.ClientFingerprint) == "" {
 		return nil, errors.New("artx client-fingerprint is required")
@@ -99,7 +102,10 @@ func (artx *ArtX) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Co
 	defer func() { safeConnClose(raw, err) }()
 	destination := artxTransport.Destination{Host: metadata.Host, IP: metadata.DstIP, Port: metadata.DstPort}
 	connection, err := artxTransport.DialContext(ctx, raw, artxTransport.ClientConfig{
-		Password: artx.option.Password, ProfileVersion: uint32(artx.option.ProfileVersion), TLSConfig: artx.tlsConfig,
+		Password:       artx.option.Password,
+		Profile:        artx.option.Profile,
+		ProfileVersion: uint32(artx.option.ProfileVersion),
+		TLSConfig:      artx.tlsConfig,
 	}, destination)
 	if err != nil {
 		return nil, err
