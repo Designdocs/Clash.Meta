@@ -291,7 +291,8 @@ func TestArtXCloseDoesNotWaitForWriters(t *testing.T) {
 
 func TestArtXCloseAfterBothFINsDrainsPeerShutdown(t *testing.T) {
 	client, server := net.Pipe()
-	transport := newCloseWriteTrackingConn(client)
+	raw := newCloseWriteTrackingConn(client)
+	transport := newTLSCloseWriteTrackingConn(raw)
 	connection := NewConn(transport)
 	t.Cleanup(func() {
 		_ = client.Close()
@@ -310,6 +311,7 @@ func TestArtXCloseAfterBothFINsDrainsPeerShutdown(t *testing.T) {
 			return
 		}
 		<-transport.closeWriteCalled
+		<-raw.closeWriteCalled
 		select {
 		case <-transport.closed:
 			serverDone <- errors.New("client closed transport before peer shutdown")
@@ -596,6 +598,7 @@ type serverAction func(net.Conn) error
 
 type closeWriteTrackingConn struct {
 	net.Conn
+	netConnection    net.Conn
 	closeWriteCalled chan struct{}
 	closed           chan struct{}
 	closeWriteOnce   sync.Once
@@ -606,6 +609,19 @@ func newCloseWriteTrackingConn(connection net.Conn) *closeWriteTrackingConn {
 	return &closeWriteTrackingConn{
 		Conn: connection, closeWriteCalled: make(chan struct{}), closed: make(chan struct{}),
 	}
+}
+
+func newTLSCloseWriteTrackingConn(connection net.Conn) *closeWriteTrackingConn {
+	transport := newCloseWriteTrackingConn(connection)
+	transport.netConnection = connection
+	return transport
+}
+
+func (connection *closeWriteTrackingConn) NetConn() net.Conn {
+	if connection.netConnection != nil {
+		return connection.netConnection
+	}
+	return connection
 }
 
 func (connection *closeWriteTrackingConn) CloseWrite() error {

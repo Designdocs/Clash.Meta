@@ -111,10 +111,10 @@ func (connection *Conn) Close() error {
 		select {
 		case <-connection.readDone:
 		default:
-			// Both ArtX directions are done. Send TLS close-notify, then let the
-			// reader drain the peer shutdown before it closes the raw transport.
+			// Both ArtX directions are done. Send TLS close-notify and the raw TCP
+			// FIN, then let the reader drain the peer shutdown before final close.
 			if closer, ok := connection.Conn.(interface{ CloseWrite() error }); ok {
-				if err := closer.CloseWrite(); err == nil {
+				if err := closeWriteTransport(connection.Conn, closer); err == nil {
 					if err := connection.Conn.SetReadDeadline(time.Now().Add(time.Second)); err == nil {
 						graceful = true
 					}
@@ -131,6 +131,25 @@ func (connection *Conn) Close() error {
 		closeErr = connection.Conn.Close()
 	})
 	return closeErr
+}
+
+func closeWriteTransport(connection net.Conn, tlsCloser interface{ CloseWrite() error }) error {
+	if err := tlsCloser.CloseWrite(); err != nil {
+		return err
+	}
+	unwrapper, ok := connection.(interface{ NetConn() net.Conn })
+	if !ok {
+		return nil
+	}
+	raw := unwrapper.NetConn()
+	if raw == nil || raw == connection {
+		return nil
+	}
+	rawCloser, ok := raw.(interface{ CloseWrite() error })
+	if !ok {
+		return nil
+	}
+	return rawCloser.CloseWrite()
 }
 
 func (connection *Conn) readLoop() {
