@@ -101,6 +101,31 @@ func (connection *Conn) Close() error {
 	connection.localClose.Store(true)
 	connection.cancel()
 	connection.reader.abort(net.ErrClosed)
+	writeDone := false
+	if connection.writeMu.TryLock() {
+		writeDone = connection.writeDone
+		connection.writeMu.Unlock()
+	}
+	graceful := false
+	if writeDone && connection.peerFinished() && connection.frames.mu.TryLock() {
+		select {
+		case <-connection.readDone:
+		default:
+			// Both ArtX directions are done. Send TLS close-notify, then let the
+			// reader drain the peer shutdown before it closes the raw transport.
+			if closer, ok := connection.Conn.(interface{ CloseWrite() error }); ok {
+				if err := closer.CloseWrite(); err == nil {
+					if err := connection.Conn.SetReadDeadline(time.Now().Add(time.Second)); err == nil {
+						graceful = true
+					}
+				}
+			}
+		}
+		connection.frames.mu.Unlock()
+	}
+	if graceful {
+		return nil
+	}
 	var closeErr error
 	connection.closeOnce.Do(func() {
 		closeErr = connection.Conn.Close()

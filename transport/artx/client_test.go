@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -258,17 +259,88 @@ func TestArtXContextCancellationInterruptsHandshake(t *testing.T) {
 	_ = serverRaw.Close()
 }
 
-func TestArtXCloseDoesNotWaitForFINWrite(t *testing.T) {
-	client, server := net.Pipe()
-	connection := NewConn(client)
-	done := make(chan error, 1)
-	go func() { done <- connection.Close() }()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("Close blocked trying to write FIN")
+func TestArtXCloseDoesNotWaitForWriters(t *testing.T) {
+	for _, lock := range []string{"data", "control"} {
+		t.Run(lock, func(t *testing.T) {
+			client, server := net.Pipe()
+			connection := NewConn(client)
+			if lock == "data" {
+				connection.writeMu.Lock()
+				defer connection.writeMu.Unlock()
+			} else {
+				connection.writeMu.Lock()
+				connection.writeDone = true
+				connection.writeMu.Unlock()
+				connection.peerFinMu.Lock()
+				connection.peerFin = true
+				connection.peerFinMu.Unlock()
+				connection.frames.mu.Lock()
+				defer connection.frames.mu.Unlock()
+			}
+			done := make(chan error, 1)
+			go func() { done <- connection.Close() }()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("Close blocked behind an in-flight writer")
+			}
+			_ = server.Close()
+		})
 	}
-	_ = server.Close()
+}
+
+func TestArtXCloseAfterBothFINsDrainsPeerShutdown(t *testing.T) {
+	client, server := net.Pipe()
+	transport := newCloseWriteTrackingConn(client)
+	connection := NewConn(transport)
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
+
+	serverDone := make(chan error, 1)
+	go func() {
+		if err := WriteFrame(server, FrameFin, 1, nil); err != nil {
+			serverDone <- err
+			return
+		}
+		frame, err := ReadFrame(server)
+		if err != nil || frame.Type != FrameFin {
+			serverDone <- errors.New("client FIN missing")
+			return
+		}
+		<-transport.closeWriteCalled
+		select {
+		case <-transport.closed:
+			serverDone <- errors.New("client closed transport before peer shutdown")
+			return
+		default:
+		}
+		serverDone <- server.Close()
+	}()
+
+	if _, err := connection.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("peer FIN = %v, want EOF", err)
+	}
+	if err := connection.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("graceful transport shutdown did not complete")
+	}
+	select {
+	case <-transport.closed:
+	case <-time.After(time.Second):
+		t.Fatal("client transport stayed open after peer shutdown")
+	}
 }
 
 func TestArtXTransportRejectsBlankPassword(t *testing.T) {
@@ -437,7 +509,7 @@ func TestArtXTransportRejectsInvalidProfileAndFingerprint(t *testing.T) {
 		fingerprint string
 		want        string
 	}{
-		{name: "profile version", profileName: "balanced", profile: 3, fingerprint: "chrome", want: "profile"},
+		{name: "profile version", profileName: "balanced", profile: 4, fingerprint: "chrome", want: "profile"},
 		{name: "profile v2 mode", profileName: "web", profile: 2, fingerprint: "chrome", want: "balanced"},
 		{name: "blank fingerprint", profile: 1, fingerprint: " ", want: "fingerprint"},
 		{name: "invalid fingerprint", profile: 1, fingerprint: "artx", want: "fingerprint"},
@@ -521,6 +593,30 @@ func TestArtXRSTDiscardsBufferedData(t *testing.T) {
 }
 
 type serverAction func(net.Conn) error
+
+type closeWriteTrackingConn struct {
+	net.Conn
+	closeWriteCalled chan struct{}
+	closed           chan struct{}
+	closeWriteOnce   sync.Once
+	closeOnce        sync.Once
+}
+
+func newCloseWriteTrackingConn(connection net.Conn) *closeWriteTrackingConn {
+	return &closeWriteTrackingConn{
+		Conn: connection, closeWriteCalled: make(chan struct{}), closed: make(chan struct{}),
+	}
+}
+
+func (connection *closeWriteTrackingConn) CloseWrite() error {
+	connection.closeWriteOnce.Do(func() { close(connection.closeWriteCalled) })
+	return nil
+}
+
+func (connection *closeWriteTrackingConn) Close() error {
+	connection.closeOnce.Do(func() { close(connection.closed) })
+	return connection.Conn.Close()
+}
 
 func echoUntilFin(connection net.Conn) error {
 	for {

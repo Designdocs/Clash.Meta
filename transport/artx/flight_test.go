@@ -68,3 +68,51 @@ func TestReadServerSettingsV2RejectsUnexpectedSettingsLength(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadServerSettingsV3ReusesFailClosedFlightContract(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+		padding []byte
+		wantErr bool
+	}{
+		{name: "greased", payload: append(DefaultSettings(3).MarshalBinary(), make([]byte, 6)...)},
+		{name: "padded", payload: DefaultSettings(3).MarshalBinary(), padding: make([]byte, 14)},
+		{name: "unexpected length", payload: append(DefaultSettings(3).MarshalBinary(), make([]byte, 12)...), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+			writeDone := make(chan error, 1)
+			go func() {
+				if err := WriteFrame(server, FrameSettings, 0, test.payload); err != nil {
+					writeDone <- err
+					return
+				}
+				if test.padding != nil {
+					writeDone <- WriteFrame(server, FramePadding, 0, test.padding)
+					return
+				}
+				writeDone <- nil
+			}()
+
+			settings, err := readServerSettings(client, 3)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("unexpected profile-v3 SETTINGS length was accepted")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := settings.Validate(3); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := <-writeDone; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

@@ -13,7 +13,9 @@ func TestValidateClientProfile(t *testing.T) {
 		{name: "v1 named profile", profile: "web", profileVersion: 1},
 		{name: "v2 balanced", profile: "balanced", profileVersion: 2},
 		{name: "v2 non-balanced", profile: "media", profileVersion: 2, wantErr: true},
-		{name: "unsupported version", profile: "balanced", profileVersion: 3, wantErr: true},
+		{name: "v3 balanced", profile: "balanced", profileVersion: 3},
+		{name: "v3 non-balanced", profile: "media", profileVersion: 3, wantErr: true},
+		{name: "unsupported version", profile: "balanced", profileVersion: 4, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
