@@ -49,11 +49,11 @@ func NewArtX(option ArtXOption) (*ArtX, error) {
 	if option.Profile != "balanced" && option.Profile != "web" && option.Profile != "media" && option.Profile != "realtime" {
 		return nil, fmt.Errorf("unsupported artx profile: %s", option.Profile)
 	}
-	if option.ProfileVersion < 1 || option.ProfileVersion > 2 {
+	if option.ProfileVersion < 1 || option.ProfileVersion > 3 {
 		return nil, fmt.Errorf("unsupported artx profile-version: %d", option.ProfileVersion)
 	}
-	if option.ProfileVersion == 2 && option.Profile != "balanced" {
-		return nil, errors.New("artx profile-version 2 requires the balanced profile")
+	if option.ProfileVersion >= 2 && option.Profile != "balanced" {
+		return nil, fmt.Errorf("artx profile-version %d requires the balanced profile", option.ProfileVersion)
 	}
 	if strings.TrimSpace(option.ClientFingerprint) == "" {
 		return nil, errors.New("artx client-fingerprint is required")

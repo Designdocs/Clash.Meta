@@ -19,6 +19,7 @@ const (
 	exporterLength                   = 32
 	bucketSeconds                    = int64(60)
 	earlyRecordProfileVersion        = uint32(2)
+	earlyGapProfileVersion           = uint32(3)
 	earlyRecordPlainSettingsLength   = 24
 	earlyRecordGreasedSettingsLength = 30
 	earlyRecordPaddingLength         = 14
@@ -129,7 +130,7 @@ func readServerSettings(reader net.Conn, profileVersion uint32) (Settings, error
 }
 
 func validateServerSettingsFlight(reader net.Conn, profileVersion uint32, settingsLength int) error {
-	if profileVersion != earlyRecordProfileVersion {
+	if profileVersion < earlyRecordProfileVersion || profileVersion > earlyGapProfileVersion {
 		return nil
 	}
 	switch settingsLength {
@@ -141,11 +142,11 @@ func validateServerSettingsFlight(reader net.Conn, profileVersion uint32, settin
 			return err
 		}
 		if padding.Type != FramePadding || padding.StreamID != 0 || len(padding.Payload) != earlyRecordPaddingLength {
-			return errors.New("artx profile version 2 padding frame is invalid")
+			return fmt.Errorf("artx profile version %d padding frame is invalid", profileVersion)
 		}
 		return nil
 	default:
-		return fmt.Errorf("artx profile version 2 SETTINGS length is %d", settingsLength)
+		return fmt.Errorf("artx profile version %d SETTINGS length is %d", profileVersion, settingsLength)
 	}
 }
 
@@ -153,9 +154,9 @@ func validateClientProfile(profile string, profileVersion uint32) error {
 	switch profileVersion {
 	case 1:
 		return nil
-	case earlyRecordProfileVersion:
+	case earlyRecordProfileVersion, earlyGapProfileVersion:
 		if profile != "balanced" {
-			return errors.New("artx profile version 2 requires the balanced profile")
+			return fmt.Errorf("artx profile version %d requires the balanced profile", profileVersion)
 		}
 		return nil
 	default:

@@ -31,7 +31,7 @@ func TestArtXParserRejectsInvalidOptions(t *testing.T) {
 	}{
 		{name: "udp", key: "udp", value: true, want: "udp"},
 		{name: "profile", key: "profile", value: "unknown", want: "profile"},
-		{name: "profile version", key: "profile-version", value: 3, want: "profile-version"},
+		{name: "profile version", key: "profile-version", value: 4, want: "profile-version"},
 		{name: "missing fingerprint", key: "client-fingerprint", value: "", want: "client-fingerprint"},
 		{name: "invalid fingerprint", key: "client-fingerprint", value: "artx", want: "client-fingerprint"},
 		{name: "blank password", key: "password", value: " \t ", want: "password"},
