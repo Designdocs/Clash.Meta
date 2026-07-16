@@ -43,9 +43,6 @@ func NewArtX(option ArtXOption) (*ArtX, error) {
 	if option.Server == "" || option.Port < 1 || option.Port > 65535 || strings.TrimSpace(option.Password) == "" {
 		return nil, errors.New("invalid artx server, port, or password")
 	}
-	if option.UDP {
-		return nil, errors.New("artx wire v1 does not support udp")
-	}
 	if option.Profile != "balanced" && option.Profile != "web" && option.Profile != "media" && option.Profile != "realtime" {
 		return nil, fmt.Errorf("unsupported artx profile: %s", option.Profile)
 	}
@@ -73,6 +70,7 @@ func NewArtX(option ArtXOption) (*ArtX, error) {
 			Addr:         addr,
 			Type:         C.ArtX,
 			ProviderName: option.ProviderName,
+			UDP:          option.UDP,
 			TFO:          option.TFO,
 			MPTCP:        option.MPTCP,
 			Interface:    option.Interface,
@@ -111,6 +109,32 @@ func (artx *ArtX) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Co
 		return nil, err
 	}
 	return NewConn(connection, artx), nil
+}
+
+func (artx *ArtX) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
+	if !artx.option.UDP {
+		return nil, C.ErrNotSupport
+	}
+	if err := artx.ResolveUDP(ctx, metadata); err != nil {
+		return nil, err
+	}
+	raw, err := artx.dialer.DialContext(ctx, "tcp", artx.addr)
+	if err != nil {
+		return nil, fmt.Errorf("%s connect error: %w", artx.addr, err)
+	}
+	defer func() { safeConnClose(raw, err) }()
+
+	destination := artxTransport.Destination{Host: metadata.Host, IP: metadata.DstIP, Port: metadata.DstPort}
+	packetConnection, err := artxTransport.DialPacketContext(ctx, raw, artxTransport.ClientConfig{
+		Password:       artx.option.Password,
+		Profile:        artx.option.Profile,
+		ProfileVersion: uint32(artx.option.ProfileVersion),
+		TLSConfig:      artx.tlsConfig,
+	}, destination, metadata.UDPAddr())
+	if err != nil {
+		return nil, err
+	}
+	return newPacketConn(packetConnection, artx), nil
 }
 
 func (artx *ArtX) ProxyInfo() C.ProxyInfo {

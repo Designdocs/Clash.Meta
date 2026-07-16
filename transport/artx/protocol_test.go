@@ -52,6 +52,21 @@ func TestArtXCanonicalVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertHex(t, fin, "1200000001000000")
+
+	udpAssoc, err := MarshalFrame(FrameUDPAssoc, 1, (Destination{Host: "dns.example", Port: 53}).MarshalBinary())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHex(t, udpAssoc, "150000000100000f030b646e732e6578616d706c650035")
+	datagram, err := MarshalDatagram([]byte{0x12, 0x34})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedDatagram, err := MarshalFrame(FrameDatagram, 1, datagram)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHex(t, encodedDatagram, "160000000100000400021234")
 }
 
 func TestArtXProtocolValidation(t *testing.T) {
@@ -70,6 +85,8 @@ func TestArtXProtocolValidation(t *testing.T) {
 		{Type: FrameData, StreamID: 2},
 		{Type: FrameFin, StreamID: 0},
 		{Type: FrameRST, StreamID: 2},
+		{Type: FrameUDPAssoc, StreamID: 0},
+		{Type: FrameDatagram, StreamID: 2, Payload: []byte{0, 0}},
 		{Type: FrameWindowUpdate, StreamID: 2, Payload: []byte{0, 0, 0, 1}},
 		{Type: FramePadding, StreamID: 1},
 	} {
@@ -85,6 +102,24 @@ func TestArtXProtocolValidation(t *testing.T) {
 	}
 	if _, err := MarshalFrame(FrameData, 1, make([]byte, MaxDataPayload+1)); err == nil {
 		t.Fatal("expected oversized DATA to fail")
+	}
+	for _, payload := range [][]byte{nil, []byte("dns"), bytes.Repeat([]byte{0xa5}, MaxUDPPayload)} {
+		encoded, err := MarshalDatagram(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := ParseDatagram(encoded)
+		if err != nil || !bytes.Equal(decoded, payload) {
+			t.Fatalf("DATAGRAM round trip = %d bytes, %v", len(decoded), err)
+		}
+	}
+	if _, err := MarshalDatagram(make([]byte, MaxUDPPayload+1)); err == nil {
+		t.Fatal("expected oversized DATAGRAM to fail")
+	}
+	for _, payload := range [][]byte{nil, {0}, {0, 2, 1}, {0, 0, 1}} {
+		if _, err := ParseDatagram(payload); err == nil {
+			t.Fatalf("malformed DATAGRAM %x accepted", payload)
+		}
 	}
 	if _, err := ReadFrame(bytes.NewReader([]byte{FrameData, 0, 0})); err == nil {
 		t.Fatal("expected truncated frame header to fail")
