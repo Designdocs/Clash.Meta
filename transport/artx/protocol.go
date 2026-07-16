@@ -26,6 +26,7 @@ const (
 
 	MaxDataPayload  = 64 << 10
 	MaxFramePayload = 1 << 20
+	MaxUDPPayload   = int(^uint16(0))
 
 	InitialStreamWindow     uint32 = 256 << 10
 	InitialConnectionWindow uint32 = 1 << 20
@@ -266,7 +267,27 @@ func ParseDestination(payload []byte) (Destination, error) {
 	return destination, destination.Validate()
 }
 
+func MarshalDatagram(payload []byte) ([]byte, error) {
+	if len(payload) > MaxUDPPayload {
+		return nil, errors.New("artx DATAGRAM payload is too large")
+	}
+	encoded := make([]byte, 2+len(payload))
+	binary.BigEndian.PutUint16(encoded, uint16(len(payload)))
+	copy(encoded[2:], payload)
+	return encoded, nil
+}
+
+func ParseDatagram(payload []byte) ([]byte, error) {
+	if len(payload) < 2 || int(binary.BigEndian.Uint16(payload)) != len(payload)-2 {
+		return nil, errors.New("invalid artx DATAGRAM payload length")
+	}
+	return payload[2:], nil
+}
+
 func validateFrame(frameType byte, streamID uint32, payloadLength int) error {
+	if frameType == FrameDatagram && payloadLength > MaxUDPPayload+2 {
+		return errors.New("artx DATAGRAM payload is too large")
+	}
 	switch frameType {
 	case FrameSettings, FramePadding, FramePing, FramePong:
 		if streamID != 0 {

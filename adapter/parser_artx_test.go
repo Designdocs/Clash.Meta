@@ -18,7 +18,17 @@ func TestArtXParser(t *testing.T) {
 		t.Fatalf("unexpected type: %s", proxy.Type())
 	}
 	if proxy.SupportUDP() || proxy.SupportUOT() {
-		t.Fatal("ArtX wire v1 must remain TCP-only")
+		t.Fatal("ArtX UDP must remain disabled by default")
+	}
+
+	mapping["udp"] = true
+	udpProxy, err := ParseProxy(mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpProxy.Close()
+	if !udpProxy.SupportUDP() || udpProxy.SupportUOT() {
+		t.Fatal("ArtX UDP switch did not enable native datagrams")
 	}
 }
 
@@ -29,7 +39,6 @@ func TestArtXParserRejectsInvalidOptions(t *testing.T) {
 		value any
 		want  string
 	}{
-		{name: "udp", key: "udp", value: true, want: "udp"},
 		{name: "profile", key: "profile", value: "unknown", want: "profile"},
 		{name: "profile version", key: "profile-version", value: 4, want: "profile-version"},
 		{name: "missing fingerprint", key: "client-fingerprint", value: "", want: "client-fingerprint"},

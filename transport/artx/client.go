@@ -33,6 +33,25 @@ type ClientConfig struct {
 }
 
 func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destination Destination) (connection net.Conn, err error) {
+	connection, err = dialContext(ctx, raw, config, destination, FrameTCPSyn)
+	if err != nil {
+		return nil, err
+	}
+	return NewConn(connection), nil
+}
+
+func DialPacketContext(ctx context.Context, raw net.Conn, config ClientConfig, destination Destination, remote net.Addr) (*PacketConn, error) {
+	if remote == nil {
+		return nil, errors.New("artx UDP remote address is required")
+	}
+	connection, err := dialContext(ctx, raw, config, destination, FrameUDPAssoc)
+	if err != nil {
+		return nil, err
+	}
+	return NewPacketConn(connection, remote), nil
+}
+
+func dialContext(ctx context.Context, raw net.Conn, config ClientConfig, destination Destination, openFrame byte) (connection net.Conn, err error) {
 	if raw == nil || config.TLSConfig == nil {
 		return nil, errors.New("artx connection and TLS config are required")
 	}
@@ -95,7 +114,7 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	if err := WriteFrame(tlsConnection, FrameSettings, 0, DefaultSettings(config.ProfileVersion).MarshalBinary()); err != nil {
 		return nil, err
 	}
-	if err := WriteFrame(tlsConnection, FrameTCPSyn, 1, destination.MarshalBinary()); err != nil {
+	if err := WriteFrame(tlsConnection, openFrame, 1, destination.MarshalBinary()); err != nil {
 		return nil, err
 	}
 	if !stopContextClose() {
@@ -104,7 +123,7 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 		}
 		return nil, errors.New("artx handshake context ended")
 	}
-	return NewConn(tlsConnection), nil
+	return tlsConnection, nil
 }
 
 func readServerSettings(reader net.Conn, profileVersion uint32) (Settings, error) {

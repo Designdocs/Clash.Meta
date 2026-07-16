@@ -271,13 +271,7 @@ func (connection *Conn) controlLoop() {
 			if increment == 0 {
 				continue
 			}
-			payload := make([]byte, 4)
-			binary.BigEndian.PutUint32(payload, increment)
-			if err := connection.frames.write(FrameWindowUpdate, 0, payload); err != nil {
-				connection.terminate(err)
-				return
-			}
-			if err := connection.frames.write(FrameWindowUpdate, 1, payload); err != nil {
+			if err := connection.frames.writeWindowUpdate(increment); err != nil {
 				connection.terminate(err)
 				return
 			}
@@ -331,6 +325,18 @@ func (writer *lockedFrameWriter) write(frameType byte, streamID uint32, payload 
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
 	return WriteFrame(writer.writer, frameType, streamID, payload)
+}
+
+func (writer *lockedFrameWriter) writeWindowUpdate(increment uint32) error {
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload, increment)
+
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if err := WriteFrame(writer.writer, FrameWindowUpdate, 0, payload); err != nil {
+		return err
+	}
+	return WriteFrame(writer.writer, FrameWindowUpdate, 1, payload)
 }
 
 type sendWindow struct {
