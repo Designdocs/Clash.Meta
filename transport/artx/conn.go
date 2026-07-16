@@ -20,7 +20,8 @@ type Conn struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	reader      *receiveBuffer
-	frames      lockedFrameWriter
+	frames      *lockedFrameWriter
+	readFrame   func() (Frame, error)
 	windows     *sendWindow
 	receive     *receiveWindow
 	control     chan controlWrite
@@ -39,11 +40,19 @@ type Conn struct {
 }
 
 func NewConn(connection net.Conn) *Conn {
+	return newConn(connection, nil, nil)
+}
+
+func newConn(connection net.Conn, readFrame func() (Frame, error), writeFrame func(byte, uint32, []byte) error) *Conn {
+	if readFrame == nil {
+		readFrame = func() (Frame, error) { return ReadFrame(connection) }
+	}
 	connectionContext, cancel := context.WithCancel(context.Background())
 	artxConnection := &Conn{
 		Conn: connection, ctx: connectionContext, cancel: cancel,
 		reader: newReceiveBuffer(InitialStreamWindow),
-		frames: lockedFrameWriter{writer: connection}, windows: newSendWindow(), receive: newReceiveWindow(),
+		frames: &lockedFrameWriter{writer: connection, writeFrame: writeFrame}, readFrame: readFrame,
+		windows: newSendWindow(), receive: newReceiveWindow(),
 		control: make(chan controlWrite, 4), updateWake: make(chan struct{}, 1),
 		readDone: make(chan struct{}), controlDone: make(chan struct{}),
 	}
@@ -155,7 +164,7 @@ func closeWriteTransport(connection net.Conn, tlsCloser interface{ CloseWrite() 
 func (connection *Conn) readLoop() {
 	defer close(connection.readDone)
 	for {
-		frame, err := ReadFrame(connection.Conn)
+		frame, err := connection.readFrame()
 		if err != nil {
 			if connection.peerFinished() {
 				connection.finishAfterPeerFIN()
@@ -317,13 +326,21 @@ func (connection *Conn) finishAfterPeerFIN() {
 }
 
 type lockedFrameWriter struct {
-	mu     sync.Mutex
-	writer io.Writer
+	mu         sync.Mutex
+	writer     io.Writer
+	writeFrame func(byte, uint32, []byte) error
 }
 
 func (writer *lockedFrameWriter) write(frameType byte, streamID uint32, payload []byte) error {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
+	return writer.writeLocked(frameType, streamID, payload)
+}
+
+func (writer *lockedFrameWriter) writeLocked(frameType byte, streamID uint32, payload []byte) error {
+	if writer.writeFrame != nil {
+		return writer.writeFrame(frameType, streamID, payload)
+	}
 	return WriteFrame(writer.writer, frameType, streamID, payload)
 }
 
@@ -333,10 +350,10 @@ func (writer *lockedFrameWriter) writeWindowUpdate(increment uint32) error {
 
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
-	if err := WriteFrame(writer.writer, FrameWindowUpdate, 0, payload); err != nil {
+	if err := writer.writeLocked(FrameWindowUpdate, 0, payload); err != nil {
 		return err
 	}
-	return WriteFrame(writer.writer, FrameWindowUpdate, 1, payload)
+	return writer.writeLocked(FrameWindowUpdate, 1, payload)
 }
 
 type sendWindow struct {

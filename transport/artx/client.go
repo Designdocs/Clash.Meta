@@ -29,6 +29,7 @@ type ClientConfig struct {
 	Password       string
 	Profile        string
 	ProfileVersion uint32
+	WireVersion    uint32
 	TLSConfig      *vmess.TLSConfig
 }
 
@@ -52,8 +53,27 @@ func DialPacketContext(ctx context.Context, raw net.Conn, config ClientConfig, d
 }
 
 func dialContext(ctx context.Context, raw net.Conn, config ClientConfig, destination Destination, openFrame byte) (connection net.Conn, err error) {
+	if err := destination.Validate(); err != nil {
+		return nil, err
+	}
+	connection, err = establishSession(ctx, raw, config)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeFrame(connection, normalizedWireVersion(config.WireVersion), openFrame, 1, destination.MarshalBinary()); err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	return connection, nil
+}
+
+func establishSession(ctx context.Context, raw net.Conn, config ClientConfig) (connection net.Conn, err error) {
 	if raw == nil || config.TLSConfig == nil {
 		return nil, errors.New("artx connection and TLS config are required")
+	}
+	wireVersion := normalizedWireVersion(config.WireVersion)
+	if wireVersion != 1 && wireVersion != 2 {
+		return nil, fmt.Errorf("artx unsupported wire version: %d", wireVersion)
 	}
 	if strings.TrimSpace(config.Password) == "" {
 		return nil, errors.New("artx password is required")
@@ -66,9 +86,6 @@ func dialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	}
 	if _, ok := tlsC.GetFingerprint(config.TLSConfig.ClientFingerprint); !ok {
 		return nil, fmt.Errorf("artx unsupported client fingerprint: %s", config.TLSConfig.ClientFingerprint)
-	}
-	if err := destination.Validate(); err != nil {
-		return nil, err
 	}
 	defer func() {
 		if err != nil {
@@ -104,17 +121,14 @@ func dialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 		return nil, err
 	}
 
-	serverSettings, err := readServerSettings(tlsConnection, config.ProfileVersion)
+	serverSettings, err := readServerSettingsForWire(tlsConnection, wireVersion, config.ProfileVersion)
 	if err != nil {
 		return nil, err
 	}
-	if err := serverSettings.Validate(config.ProfileVersion); err != nil {
+	if err := serverSettings.validateWire(wireVersion, config.ProfileVersion); err != nil {
 		return nil, err
 	}
-	if err := WriteFrame(tlsConnection, FrameSettings, 0, DefaultSettings(config.ProfileVersion).MarshalBinary()); err != nil {
-		return nil, err
-	}
-	if err := WriteFrame(tlsConnection, openFrame, 1, destination.MarshalBinary()); err != nil {
+	if err := writeFrame(tlsConnection, wireVersion, FrameSettings, 0, settingsForWire(wireVersion, config.ProfileVersion).MarshalBinary()); err != nil {
 		return nil, err
 	}
 	if !stopContextClose() {
@@ -126,9 +140,20 @@ func dialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	return tlsConnection, nil
 }
 
+func normalizedWireVersion(wireVersion uint32) uint32 {
+	if wireVersion == 0 {
+		return 1
+	}
+	return wireVersion
+}
+
 func readServerSettings(reader net.Conn, profileVersion uint32) (Settings, error) {
+	return readServerSettingsForWire(reader, 1, profileVersion)
+}
+
+func readServerSettingsForWire(reader net.Conn, wireVersion, profileVersion uint32) (Settings, error) {
 	for {
-		frame, err := ReadFrame(reader)
+		frame, err := readFrame(reader, wireVersion)
 		if err != nil {
 			return Settings{}, err
 		}
@@ -137,7 +162,7 @@ func readServerSettings(reader net.Conn, profileVersion uint32) (Settings, error
 			if err != nil {
 				return Settings{}, err
 			}
-			if err := validateServerSettingsFlight(reader, profileVersion, len(frame.Payload)); err != nil {
+			if err := validateServerSettingsFlight(reader, wireVersion, profileVersion, len(frame.Payload)); err != nil {
 				return Settings{}, err
 			}
 			return settings, nil
@@ -148,15 +173,19 @@ func readServerSettings(reader net.Conn, profileVersion uint32) (Settings, error
 	}
 }
 
-func validateServerSettingsFlight(reader net.Conn, profileVersion uint32, settingsLength int) error {
+func validateServerSettingsFlight(reader net.Conn, wireVersion, profileVersion uint32, settingsLength int) error {
 	if profileVersion < earlyRecordProfileVersion || profileVersion > earlyGapProfileVersion {
 		return nil
 	}
+	baseLength := earlyRecordPlainSettingsLength
+	if wireVersion == 2 {
+		baseLength += 6
+	}
 	switch settingsLength {
-	case earlyRecordGreasedSettingsLength:
+	case baseLength + 6:
 		return nil
-	case earlyRecordPlainSettingsLength:
-		padding, err := ReadFrame(reader)
+	case baseLength:
+		padding, err := readFrame(reader, wireVersion)
 		if err != nil {
 			return err
 		}

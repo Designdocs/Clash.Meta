@@ -37,6 +37,7 @@ const (
 	settingInitialStreamWindow  uint16 = 0x0002
 	settingInitialConnWindow    uint16 = 0x0003
 	settingProfileVersion       uint16 = 0x0005
+	settingSessionReuse         uint16 = 0x0007
 )
 
 type Frame struct {
@@ -46,10 +47,14 @@ type Frame struct {
 }
 
 func MarshalFrame(frameType byte, streamID uint32, payload []byte) ([]byte, error) {
+	return marshalFrame(1, frameType, streamID, payload)
+}
+
+func marshalFrame(wireVersion uint32, frameType byte, streamID uint32, payload []byte) ([]byte, error) {
 	if len(payload) > MaxFramePayload || frameType == FrameData && len(payload) > MaxDataPayload {
 		return nil, fmt.Errorf("artx frame payload is too large: %d", len(payload))
 	}
-	if err := validateFrame(frameType, streamID, len(payload)); err != nil {
+	if err := validateFrameForWire(wireVersion, frameType, streamID, len(payload)); err != nil {
 		return nil, err
 	}
 	frame := make([]byte, 8+len(payload))
@@ -62,7 +67,11 @@ func MarshalFrame(frameType byte, streamID uint32, payload []byte) ([]byte, erro
 }
 
 func WriteFrame(writer io.Writer, frameType byte, streamID uint32, payload []byte) error {
-	frame, err := MarshalFrame(frameType, streamID, payload)
+	return writeFrame(writer, 1, frameType, streamID, payload)
+}
+
+func writeFrame(writer io.Writer, wireVersion uint32, frameType byte, streamID uint32, payload []byte) error {
+	frame, err := marshalFrame(wireVersion, frameType, streamID, payload)
 	if err != nil {
 		return err
 	}
@@ -80,6 +89,10 @@ func WriteFrame(writer io.Writer, frameType byte, streamID uint32, payload []byt
 }
 
 func ReadFrame(reader io.Reader) (Frame, error) {
+	return readFrame(reader, 1)
+}
+
+func readFrame(reader io.Reader, wireVersion uint32) (Frame, error) {
 	var header [8]byte
 	if _, err := io.ReadFull(reader, header[:]); err != nil {
 		return Frame{}, err
@@ -88,7 +101,7 @@ func ReadFrame(reader io.Reader) (Frame, error) {
 	if length > MaxFramePayload || header[0] == FrameData && length > MaxDataPayload {
 		return Frame{}, fmt.Errorf("artx frame payload is too large: %d", length)
 	}
-	if err := validateFrame(header[0], binary.BigEndian.Uint32(header[1:5]), length); err != nil {
+	if err := validateFrameForWire(wireVersion, header[0], binary.BigEndian.Uint32(header[1:5]), length); err != nil {
 		return Frame{}, err
 	}
 	payload := make([]byte, length)
@@ -145,18 +158,33 @@ type Settings struct {
 	InitialStreamWindow     uint32
 	InitialConnectionWindow uint32
 	ProfileVersion          uint32
+	SessionReuse            uint32
 }
 
 func DefaultSettings(profileVersion uint32) Settings {
-	return Settings{1, InitialStreamWindow, InitialConnectionWindow, profileVersion}
+	return Settings{MaxConcurrentStreams: 1, InitialStreamWindow: InitialStreamWindow, InitialConnectionWindow: InitialConnectionWindow, ProfileVersion: profileVersion}
+}
+
+func settingsForWire(wireVersion, profileVersion uint32) Settings {
+	settings := DefaultSettings(profileVersion)
+	if wireVersion == 2 {
+		settings.SessionReuse = 1
+	}
+	return settings
 }
 
 func (settings Settings) MarshalBinary() []byte {
 	payload := make([]byte, 24)
+	if settings.SessionReuse != 0 {
+		payload = append(payload, make([]byte, 6)...)
+	}
 	settingsEntry(payload[0:6], settingMaxConcurrentStreams, settings.MaxConcurrentStreams)
 	settingsEntry(payload[6:12], settingInitialStreamWindow, settings.InitialStreamWindow)
 	settingsEntry(payload[12:18], settingInitialConnWindow, settings.InitialConnectionWindow)
 	settingsEntry(payload[18:24], settingProfileVersion, settings.ProfileVersion)
+	if settings.SessionReuse != 0 {
+		settingsEntry(payload[24:30], settingSessionReuse, settings.SessionReuse)
+	}
 	return payload
 }
 
@@ -176,6 +204,8 @@ func ParseSettings(payload []byte) (Settings, error) {
 			settings.InitialConnectionWindow = value
 		case settingProfileVersion:
 			settings.ProfileVersion = value
+		case settingSessionReuse:
+			settings.SessionReuse = value
 		}
 		payload = payload[6:]
 	}
@@ -185,6 +215,13 @@ func ParseSettings(payload []byte) (Settings, error) {
 func (settings Settings) Validate(profileVersion uint32) error {
 	if settings != DefaultSettings(profileVersion) {
 		return fmt.Errorf("incompatible artx SETTINGS: %#v", settings)
+	}
+	return nil
+}
+
+func (settings Settings) validateWire(wireVersion, profileVersion uint32) error {
+	if settings != settingsForWire(wireVersion, profileVersion) {
+		return fmt.Errorf("incompatible artx wire %d SETTINGS: %#v", wireVersion, settings)
 	}
 	return nil
 }
@@ -285,6 +322,10 @@ func ParseDatagram(payload []byte) ([]byte, error) {
 }
 
 func validateFrame(frameType byte, streamID uint32, payloadLength int) error {
+	return validateFrameForWire(1, frameType, streamID, payloadLength)
+}
+
+func validateFrameForWire(wireVersion uint32, frameType byte, streamID uint32, payloadLength int) error {
 	if frameType == FrameDatagram && payloadLength > MaxUDPPayload+2 {
 		return errors.New("artx DATAGRAM payload is too large")
 	}
@@ -294,11 +335,11 @@ func validateFrame(frameType byte, streamID uint32, payloadLength int) error {
 			return errors.New("artx connection frame has a stream ID")
 		}
 	case FrameTCPSyn, FrameData, FrameFin, FrameRST, FrameUDPAssoc, FrameDatagram:
-		if streamID != 1 {
+		if !validStreamID(wireVersion, streamID) {
 			return errors.New("artx stream frame has an invalid stream ID")
 		}
 	case FrameWindowUpdate:
-		if streamID != 0 && streamID != 1 {
+		if streamID != 0 && !validStreamID(wireVersion, streamID) {
 			return errors.New("artx WINDOW_UPDATE has an invalid stream ID")
 		}
 	}
@@ -321,4 +362,8 @@ func validateFrame(frameType byte, streamID uint32, payloadLength int) error {
 		}
 	}
 	return nil
+}
+
+func validStreamID(wireVersion, streamID uint32) bool {
+	return streamID == 1 || wireVersion == 2 && streamID != 0 && streamID&1 == 1
 }
