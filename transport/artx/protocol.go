@@ -125,9 +125,7 @@ func BuildAuthFrame(psk, salt, exporter []byte, timestampBucket uint32, padding 
 		return nil, fmt.Errorf("artx auth padding is too large: %d", len(padding))
 	}
 
-	locatorMAC := hmac.New(sha256.New, psk)
-	locatorMAC.Write([]byte("artx-user-locator-v1"))
-	locator := locatorMAC.Sum(nil)
+	locator := calculateUserLocator(psk)
 
 	var bucket [4]byte
 	binary.BigEndian.PutUint32(bucket[:], timestampBucket)
@@ -142,7 +140,7 @@ func BuildAuthFrame(psk, salt, exporter []byte, timestampBucket uint32, padding 
 	offset := 2
 	copy(frame[offset:], salt)
 	offset += len(salt)
-	copy(frame[offset:], locator[:8])
+	copy(frame[offset:], locator[:])
 	offset += 8
 	copy(frame[offset:], bucket[:])
 	offset += 4
@@ -151,6 +149,14 @@ func BuildAuthFrame(psk, salt, exporter []byte, timestampBucket uint32, padding 
 	binary.BigEndian.PutUint16(frame[offset:offset+2], uint16(len(padding)))
 	copy(frame[offset+2:], padding)
 	return frame, nil
+}
+
+func calculateUserLocator(psk []byte) [8]byte {
+	locatorMAC := hmac.New(sha256.New, psk)
+	_, _ = locatorMAC.Write([]byte("artx-user-locator-v1"))
+	var locator [8]byte
+	copy(locator[:], locatorMAC.Sum(nil))
+	return locator
 }
 
 type Settings struct {

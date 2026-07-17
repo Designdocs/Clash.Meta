@@ -37,6 +37,14 @@ func TestArtXParser(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer wireV2Proxy.Close()
+
+	mapping = validArtXMapping()
+	mapping["wire-version"] = 3
+	wireV3Proxy, err := ParseProxy(mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wireV3Proxy.Close()
 }
 
 func TestArtXParserRejectsInvalidOptions(t *testing.T) {
@@ -48,7 +56,7 @@ func TestArtXParserRejectsInvalidOptions(t *testing.T) {
 	}{
 		{name: "profile", key: "profile", value: "unknown", want: "profile"},
 		{name: "profile version", key: "profile-version", value: 4, want: "profile-version"},
-		{name: "wire version", key: "wire-version", value: 3, want: "wire-version"},
+		{name: "wire version", key: "wire-version", value: 4, want: "wire-version"},
 		{name: "missing fingerprint", key: "client-fingerprint", value: "", want: "client-fingerprint"},
 		{name: "invalid fingerprint", key: "client-fingerprint", value: "artx", want: "client-fingerprint"},
 		{name: "blank password", key: "password", value: " \t ", want: "password"},
