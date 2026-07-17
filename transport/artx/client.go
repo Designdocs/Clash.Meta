@@ -30,10 +30,14 @@ type ClientConfig struct {
 	Profile        string
 	ProfileVersion uint32
 	WireVersion    uint32
+	Authority      string
 	TLSConfig      *vmess.TLSConfig
 }
 
 func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destination Destination) (connection net.Conn, err error) {
+	if normalizedWireVersion(config.WireVersion) == 3 {
+		return dialWireV3Context(ctx, raw, config, destination)
+	}
 	connection, err = dialContext(ctx, raw, config, destination, FrameTCPSyn)
 	if err != nil {
 		return nil, err
@@ -42,6 +46,9 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 }
 
 func DialPacketContext(ctx context.Context, raw net.Conn, config ClientConfig, destination Destination, remote net.Addr) (*PacketConn, error) {
+	if normalizedWireVersion(config.WireVersion) == 3 {
+		return nil, errors.New("artx wire-v3 is TCP-only")
+	}
 	if remote == nil {
 		return nil, errors.New("artx UDP remote address is required")
 	}
@@ -68,24 +75,12 @@ func dialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 }
 
 func establishSession(ctx context.Context, raw net.Conn, config ClientConfig) (connection net.Conn, err error) {
-	if raw == nil || config.TLSConfig == nil {
-		return nil, errors.New("artx connection and TLS config are required")
-	}
 	wireVersion := normalizedWireVersion(config.WireVersion)
 	if wireVersion != 1 && wireVersion != 2 {
 		return nil, fmt.Errorf("artx unsupported wire version: %d", wireVersion)
 	}
-	if strings.TrimSpace(config.Password) == "" {
-		return nil, errors.New("artx password is required")
-	}
-	if err := validateClientProfile(config.Profile, config.ProfileVersion); err != nil {
+	if err := validateClientConfig(raw, config, wireVersion); err != nil {
 		return nil, err
-	}
-	if strings.TrimSpace(config.TLSConfig.ClientFingerprint) == "" {
-		return nil, errors.New("artx client fingerprint is required")
-	}
-	if _, ok := tlsC.GetFingerprint(config.TLSConfig.ClientFingerprint); !ok {
-		return nil, fmt.Errorf("artx unsupported client fingerprint: %s", config.TLSConfig.ClientFingerprint)
 	}
 	defer func() {
 		if err != nil {
@@ -95,15 +90,9 @@ func establishSession(ctx context.Context, raw net.Conn, config ClientConfig) (c
 	stopContextClose := context.AfterFunc(ctx, func() { _ = raw.Close() })
 	defer stopContextClose()
 
-	tlsConfig := *config.TLSConfig
-	tlsConfig.DisableRenegotiation = true
-	tlsConnection, err := vmess.StreamTLSConn(ctx, raw, &tlsConfig)
+	tlsConnection, state, err := dialArtXTLS(ctx, raw, config, nil)
 	if err != nil {
 		return nil, err
-	}
-	state := tlsC.GetTLSConnectionState(tlsConnection)
-	if state.Version != tls.VersionTLS13 {
-		return nil, errors.New("artx TLS 1.3 is required")
 	}
 	exporter, err := state.ExportKeyingMaterial(exporterLabel, nil, exporterLength)
 	if err != nil {
@@ -138,6 +127,46 @@ func establishSession(ctx context.Context, raw net.Conn, config ClientConfig) (c
 		return nil, errors.New("artx handshake context ended")
 	}
 	return tlsConnection, nil
+}
+
+func validateClientConfig(raw net.Conn, config ClientConfig, wireVersion uint32) error {
+	if raw == nil || config.TLSConfig == nil {
+		return errors.New("artx connection and TLS config are required")
+	}
+	if strings.TrimSpace(config.Password) == "" {
+		return errors.New("artx password is required")
+	}
+	if err := validateClientProfile(config.Profile, config.ProfileVersion); err != nil {
+		return err
+	}
+	if wireVersion == 3 && (config.Profile != "balanced" || config.ProfileVersion != 1 || strings.TrimSpace(config.Authority) == "") {
+		return errors.New("artx wire-v3 requires balanced profile version 1 and authority")
+	}
+	if strings.TrimSpace(config.TLSConfig.ClientFingerprint) == "" {
+		return errors.New("artx client fingerprint is required")
+	}
+	if _, ok := tlsC.GetFingerprint(config.TLSConfig.ClientFingerprint); !ok {
+		return fmt.Errorf("artx unsupported client fingerprint: %s", config.TLSConfig.ClientFingerprint)
+	}
+	return nil
+}
+
+func dialArtXTLS(ctx context.Context, raw net.Conn, config ClientConfig, nextProtos []string) (net.Conn, tls.ConnectionState, error) {
+	tlsConfig := *config.TLSConfig
+	tlsConfig.DisableRenegotiation = true
+	if nextProtos != nil {
+		tlsConfig.NextProtos = nextProtos
+	}
+	connection, err := vmess.StreamTLSConn(ctx, raw, &tlsConfig)
+	if err != nil {
+		return nil, tls.ConnectionState{}, err
+	}
+	state := tlsC.GetTLSConnectionState(connection)
+	if state.Version != tls.VersionTLS13 {
+		_ = connection.Close()
+		return nil, tls.ConnectionState{}, errors.New("artx TLS 1.3 is required")
+	}
+	return connection, state, nil
 }
 
 func normalizedWireVersion(wireVersion uint32) uint32 {

@@ -47,7 +47,7 @@ func NewArtX(option ArtXOption) (*ArtX, error) {
 	if option.WireVersion == 0 {
 		option.WireVersion = 1
 	}
-	if option.WireVersion != 1 && option.WireVersion != 2 {
+	if option.WireVersion != 1 && option.WireVersion != 2 && option.WireVersion != 3 {
 		return nil, fmt.Errorf("unsupported artx wire-version: %d", option.WireVersion)
 	}
 	if option.Server == "" || option.Port < 1 || option.Port > 65535 || strings.TrimSpace(option.Password) == "" {
@@ -61,6 +61,9 @@ func NewArtX(option ArtXOption) (*ArtX, error) {
 	}
 	if option.ProfileVersion >= 2 && option.Profile != "balanced" {
 		return nil, fmt.Errorf("artx profile-version %d requires the balanced profile", option.ProfileVersion)
+	}
+	if option.WireVersion == 3 && (option.Profile != "balanced" || option.ProfileVersion != 1 || option.UDP) {
+		return nil, errors.New("artx wire-version 3 requires balanced profile-version 1 and udp disabled")
 	}
 	if strings.TrimSpace(option.ClientFingerprint) == "" {
 		return nil, errors.New("artx client-fingerprint is required")
@@ -120,6 +123,8 @@ func (artx *ArtX) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Co
 		Password:       artx.option.Password,
 		Profile:        artx.option.Profile,
 		ProfileVersion: uint32(artx.option.ProfileVersion),
+		WireVersion:    uint32(artx.option.WireVersion),
+		Authority:      artx.wireV3Authority(),
 		TLSConfig:      artx.tlsConfig,
 	}, destination)
 	if err != nil {
@@ -128,7 +133,24 @@ func (artx *ArtX) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Co
 	return NewConn(connection, artx), nil
 }
 
+func (artx *ArtX) wireV3Authority() string {
+	if artx.option.WireVersion != 3 {
+		return ""
+	}
+	host := artx.tlsConfig.Host
+	if artx.option.Port == 443 {
+		if net.ParseIP(host) != nil && strings.Contains(host, ":") {
+			return "[" + host + "]"
+		}
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(artx.option.Port))
+}
+
 func (artx *ArtX) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
+	if artx.option.WireVersion == 3 {
+		return nil, C.ErrNotSupport
+	}
 	if !artx.option.UDP {
 		return nil, C.ErrNotSupport
 	}
