@@ -45,6 +45,14 @@ func TestArtXParser(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer wireV3Proxy.Close()
+
+	mapping = validArtXMapping()
+	mapping["wire-version"] = 4
+	wireV4Proxy, err := ParseProxy(mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wireV4Proxy.Close()
 }
 
 func TestArtXParserRejectsInvalidOptions(t *testing.T) {
@@ -56,7 +64,8 @@ func TestArtXParserRejectsInvalidOptions(t *testing.T) {
 	}{
 		{name: "profile", key: "profile", value: "unknown", want: "profile"},
 		{name: "profile version", key: "profile-version", value: 4, want: "profile-version"},
-		{name: "wire version", key: "wire-version", value: 4, want: "wire-version"},
+		{name: "wire version", key: "wire-version", value: 5, want: "wire-version"},
+		{name: "UDP mode", key: "udp-mode", value: "fast", want: "udp-mode"},
 		{name: "missing fingerprint", key: "client-fingerprint", value: "", want: "client-fingerprint"},
 		{name: "invalid fingerprint", key: "client-fingerprint", value: "artx", want: "client-fingerprint"},
 		{name: "blank password", key: "password", value: " \t ", want: "password"},
@@ -71,6 +80,29 @@ func TestArtXParserRejectsInvalidOptions(t *testing.T) {
 				t.Fatalf("expected %q error, got %v", test.want, err)
 			}
 		})
+	}
+}
+
+func TestArtXParserAcceptsExplicitNativeUDPMode(t *testing.T) {
+	mapping := validArtXMapping()
+	mapping["udp"] = true
+	mapping["udp-mode"] = "native"
+	proxy, err := ParseProxy(mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	if !proxy.SupportUDP() {
+		t.Fatal("ArtX native UDP mode did not enable UDP")
+	}
+}
+
+func TestArtXParserRejectsWireV4WithoutDNSSNI(t *testing.T) {
+	mapping := validArtXMapping()
+	mapping["wire-version"] = 4
+	mapping["sni"] = "127.0.0.1"
+	if _, err := ParseProxy(mapping); err == nil || !strings.Contains(err.Error(), "DNS SNI") {
+		t.Fatalf("expected wire-v4 DNS SNI error, got %v", err)
 	}
 }
 
