@@ -12,7 +12,9 @@ import (
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
 	artxTransport "github.com/metacubex/mihomo/transport/artx"
+	"github.com/metacubex/mihomo/transport/tuic/common"
 	"github.com/metacubex/mihomo/transport/vmess"
+	"github.com/metacubex/quic-go"
 )
 
 type ArtX struct {
@@ -41,13 +43,23 @@ type ArtXOption struct {
 	ProfileVersion    int        `proxy:"profile-version"`
 	WireVersion       int        `proxy:"wire-version,omitempty"`
 	UDP               bool       `proxy:"udp,omitempty"`
+	UDPMode           string     `proxy:"udp-mode,omitempty"`
 }
 
 func NewArtX(option ArtXOption) (*ArtX, error) {
 	if option.WireVersion == 0 {
 		option.WireVersion = 1
 	}
-	if option.WireVersion != 1 && option.WireVersion != 2 && option.WireVersion != 3 {
+	if option.UDPMode == "" {
+		option.UDPMode = "compat"
+	}
+	if option.UDPMode != "compat" && option.UDPMode != "native" {
+		return nil, fmt.Errorf("unsupported artx udp-mode: %s", option.UDPMode)
+	}
+	if !option.UDP && option.UDPMode != "compat" {
+		return nil, errors.New("artx udp-mode native requires udp enabled")
+	}
+	if option.WireVersion != 1 && option.WireVersion != 2 && option.WireVersion != 3 && option.WireVersion != 4 {
 		return nil, fmt.Errorf("unsupported artx wire-version: %d", option.WireVersion)
 	}
 	if option.Server == "" || option.Port < 1 || option.Port > 65535 || strings.TrimSpace(option.Password) == "" {
@@ -62,14 +74,21 @@ func NewArtX(option ArtXOption) (*ArtX, error) {
 	if option.ProfileVersion >= 2 && option.Profile != "balanced" {
 		return nil, fmt.Errorf("artx profile-version %d requires the balanced profile", option.ProfileVersion)
 	}
-	if option.WireVersion == 3 && (option.Profile != "balanced" || option.ProfileVersion != 1 || option.UDP) {
-		return nil, errors.New("artx wire-version 3 requires balanced profile-version 1 and udp disabled")
+	if (option.WireVersion == 3 || option.WireVersion == 4) && (option.Profile != "balanced" || option.ProfileVersion != 1 || option.UDP) {
+		return nil, fmt.Errorf("artx wire-version %d requires balanced profile-version 1 and udp disabled", option.WireVersion)
 	}
 	if strings.TrimSpace(option.ClientFingerprint) == "" {
 		return nil, errors.New("artx client-fingerprint is required")
 	}
 	if _, ok := tlsC.GetFingerprint(option.ClientFingerprint); !ok {
 		return nil, fmt.Errorf("unsupported artx client-fingerprint: %s", option.ClientFingerprint)
+	}
+	tlsHost := option.SNI
+	if tlsHost == "" {
+		tlsHost = option.Server
+	}
+	if option.WireVersion == 4 && (net.ParseIP(tlsHost) != nil || tlsHost != strings.ToLower(strings.TrimSuffix(tlsHost, "."))) {
+		return nil, errors.New("artx wire-version 4 requires a canonical DNS SNI")
 	}
 	echConfig, err := option.ECHOpts.Parse()
 	if err != nil {
@@ -91,10 +110,6 @@ func NewArtX(option ArtXOption) (*ArtX, error) {
 			Prefer:       option.IPVersion,
 		}),
 		option: &option,
-	}
-	tlsHost := option.SNI
-	if tlsHost == "" {
-		tlsHost = option.Server
 	}
 	outbound.tlsConfig = &vmess.TLSConfig{
 		Host: tlsHost, SkipCertVerify: option.SkipCertVerify, NextProtos: option.ALPN,
@@ -124,7 +139,7 @@ func (artx *ArtX) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Co
 		Profile:        artx.option.Profile,
 		ProfileVersion: uint32(artx.option.ProfileVersion),
 		WireVersion:    uint32(artx.option.WireVersion),
-		Authority:      artx.wireV3Authority(),
+		Authority:      artx.wireAuthenticationAuthority(),
 		TLSConfig:      artx.tlsConfig,
 	}, destination)
 	if err != nil {
@@ -133,10 +148,33 @@ func (artx *ArtX) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Co
 	return NewConn(connection, artx), nil
 }
 
-func (artx *ArtX) wireV3Authority() string {
-	if artx.option.WireVersion != 3 {
-		return ""
+func (artx *ArtX) listenNativeUDP(ctx context.Context, destination artxTransport.Destination, remote net.Addr) (_ C.PacketConn, err error) {
+	tlsConfig, err := artxTransport.PrepareNativeUDPTLS(ctx, artxTransport.ClientConfig{TLSConfig: artx.tlsConfig})
+	if err != nil {
+		return nil, err
 	}
+	packetConn, quicConn, err := common.DialQuic(ctx, artx.addr, artx.DialOptions(), artx.dialer, tlsConfig, &quic.Config{
+		EnableDatagrams:   true,
+		InitialPacketSize: 1242,
+	}, false)
+	if err != nil {
+		return nil, err
+	}
+	closeTransport := func() error {
+		return errors.Join(quicConn.CloseWithError(0, ""), packetConn.Close())
+	}
+	connection, err := artxTransport.DialNativeUDP(ctx, quicConn, artxTransport.ClientConfig{
+		Password:  artx.option.Password,
+		Authority: artx.nativeUDPAuthority(),
+	}, destination, remote, closeTransport)
+	if err != nil {
+		_ = closeTransport()
+		return nil, err
+	}
+	return newPacketConn(connection, artx), nil
+}
+
+func (artx *ArtX) nativeUDPAuthority() string {
 	host := artx.tlsConfig.Host
 	if artx.option.Port == 443 {
 		if net.ParseIP(host) != nil && strings.Contains(host, ":") {
@@ -147,8 +185,25 @@ func (artx *ArtX) wireV3Authority() string {
 	return net.JoinHostPort(host, strconv.Itoa(artx.option.Port))
 }
 
+func (artx *ArtX) wireAuthenticationAuthority() string {
+	if artx.option.WireVersion != 3 && artx.option.WireVersion != 4 {
+		return ""
+	}
+	host := artx.tlsConfig.Host
+	if artx.option.WireVersion == 4 {
+		return strings.ToLower(strings.TrimSuffix(host, "."))
+	}
+	if artx.option.Port == 443 {
+		if net.ParseIP(host) != nil && strings.Contains(host, ":") {
+			return "[" + host + "]"
+		}
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(artx.option.Port))
+}
+
 func (artx *ArtX) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
-	if artx.option.WireVersion == 3 {
+	if artx.option.WireVersion == 3 || artx.option.WireVersion == 4 {
 		return nil, C.ErrNotSupport
 	}
 	if !artx.option.UDP {
@@ -158,12 +213,17 @@ func (artx *ArtX) ListenPacketContext(ctx context.Context, metadata *C.Metadata)
 		return nil, err
 	}
 	destination := artxTransport.Destination{Host: metadata.Host, IP: metadata.DstIP, Port: metadata.DstPort}
+	if artx.option.UDPMode == "native" {
+		return artx.listenNativeUDP(ctx, destination, metadata.UDPAddr())
+	}
 	if artx.option.WireVersion == 2 {
 		connection, err := artx.openReusablePacket(ctx, destination, metadata.UDPAddr())
 		if err != nil {
 			return nil, err
 		}
-		return newPacketConn(connection, artx), nil
+		return newPacketConn(
+			artxTransport.ObserveLifecyclePacketConn(connection, metadata.SrcPort), artx,
+		), nil
 	}
 	raw, err := artx.dialer.DialContext(ctx, "tcp", artx.addr)
 	if err != nil {
@@ -180,7 +240,9 @@ func (artx *ArtX) ListenPacketContext(ctx context.Context, metadata *C.Metadata)
 	if err != nil {
 		return nil, err
 	}
-	return newPacketConn(packetConnection, artx), nil
+	return newPacketConn(
+		artxTransport.ObserveLifecyclePacketConn(packetConnection, metadata.SrcPort), artx,
+	), nil
 }
 
 const maxReusableArtXSessions = 4

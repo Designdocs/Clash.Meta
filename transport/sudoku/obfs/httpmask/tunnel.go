@@ -1450,6 +1450,7 @@ func (c *pollConn) pullLoop() {
 				continue
 			}
 			_ = c.closeWithError(fmt.Errorf("poll pull scan failed: %w", err))
+			cancel()
 			return
 		}
 		if resp.Trailer.Get(tunnelStreamEOFHeader) == "1" {
