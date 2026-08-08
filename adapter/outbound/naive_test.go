@@ -73,3 +73,51 @@ func TestNewNaiveAcceptsExplicitHTTP2(t *testing.T) {
 	}
 	naive.Close()
 }
+
+// A profile that says nothing gets the TCP carrier, which is what a naive
+// server offers unless it was deliberately set up for QUIC as well.
+func TestNewNaiveDefaultsToHTTP2(t *testing.T) {
+	naive, err := NewNaive(validNaiveOption())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer naive.Close()
+
+	if naive.option.Protocol != naiveProtocolHTTP2 {
+		t.Fatalf("protocol is %q, want %q", naive.option.Protocol, naiveProtocolHTTP2)
+	}
+}
+
+func TestNewNaiveAcceptsHTTP3(t *testing.T) {
+	option := validNaiveOption()
+	option.Protocol = naiveProtocolHTTP3
+
+	naive, err := NewNaive(option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer naive.Close()
+
+	if naive.option.Protocol != naiveProtocolHTTP3 {
+		t.Fatalf("protocol is %q, want %q", naive.option.Protocol, naiveProtocolHTTP3)
+	}
+	// The QUIC path reads the same TLS settings; only the ALPN is decided later,
+	// in naive.PrepareH3TLS.
+	if naive.tlsConfig.Host != "kr.example.com" {
+		t.Fatalf("TLS host is %q, want the server host", naive.tlsConfig.Host)
+	}
+	if len(naive.tlsConfig.NextProtos) != 0 {
+		t.Fatalf("ALPN is %v, want it left for the transport to default", naive.tlsConfig.NextProtos)
+	}
+}
+
+func TestNewNaiveRejectsUnknownProtocol(t *testing.T) {
+	option := validNaiveOption()
+	option.Protocol = "http4"
+
+	naive, err := NewNaive(option)
+	if err == nil {
+		naive.Close()
+		t.Fatal("expected an error")
+	}
+}

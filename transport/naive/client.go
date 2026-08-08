@@ -56,7 +56,9 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	if err != nil {
 		return nil, err
 	}
-	clientConnection, err := new(http2.Transport).NewClientConn(tlsConnection)
+	// DisableCompression keeps `accept-encoding: gzip` off a CONNECT, which is
+	// a header Chrome never puts on one.
+	clientConnection, err := (&http2.Transport{DisableCompression: true}).NewClientConn(tlsConnection)
 	if err != nil {
 		return nil, err
 	}
@@ -114,15 +116,27 @@ func buildConnectRequest(ctx context.Context, config ClientConfig, destination s
 		return nil, err
 	}
 	request.Host = destination
-	request.Header.Set(paddingHeader, generateHeaderPadding())
-	request.Header.Set("Proxy-Authorization", basicAuthorization(config.Username, config.Password))
-	// Left empty so net/http omits it rather than announcing a Go HTTP client,
-	// which no naive deployment sends.
-	request.Header.Set("User-Agent", "")
-	for name, value := range config.ExtraHeaders {
+	for name, value := range connectRequestHeaders(config) {
 		request.Header.Set(name, value)
 	}
 	return request, nil
+}
+
+// connectRequestHeaders is the header set every naive CONNECT carries, on
+// whichever carrier. Kept apart from the request itself because the HTTP/3
+// stack speaks a different http package than net/http.
+func connectRequestHeaders(config ClientConfig) map[string]string {
+	headers := map[string]string{
+		paddingHeader:         generateHeaderPadding(),
+		"Proxy-Authorization": basicAuthorization(config.Username, config.Password),
+		// Left empty so the request omits it rather than announcing a Go HTTP
+		// client, which no naive deployment sends.
+		"User-Agent": "",
+	}
+	for name, value := range config.ExtraHeaders {
+		headers[name] = value
+	}
+	return headers
 }
 
 // handshakeTLS brings up TLS with the configured uTLS fingerprint and insists

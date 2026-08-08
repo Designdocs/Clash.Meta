@@ -53,6 +53,28 @@ func TestNaiveParserKeepsNodeWhenUDPRequested(t *testing.T) {
 	}
 }
 
+func TestNaiveParserAcceptsHTTP3(t *testing.T) {
+	mapping := validNaiveMapping()
+	mapping["protocol"] = "http3"
+	proxy, err := ParseProxy(mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+
+	if proxy.Type() != C.Naive {
+		t.Fatalf("unexpected type: %s", proxy.Type())
+	}
+	// The address still reads as host:port even though the carrier is UDP.
+	if proxy.Addr() != "kr.example.com:12443" {
+		t.Fatalf("unexpected address: %s", proxy.Addr())
+	}
+	// HTTP/3 changes the carrier, not what naive can proxy: still no UDP.
+	if proxy.SupportUDP() || proxy.SupportUOT() {
+		t.Fatal("naive must not advertise UDP support")
+	}
+}
+
 func TestNaiveParserRejectsInvalidOptions(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -82,8 +104,8 @@ func TestNaiveParserRejectsInvalidOptions(t *testing.T) {
 			want:   "server or port",
 		},
 		{
-			name:   "http3 protocol",
-			mutate: func(mapping map[string]any) { mapping["protocol"] = "http3" },
+			name:   "unknown protocol",
+			mutate: func(mapping map[string]any) { mapping["protocol"] = "http4" },
 			want:   "unsupported naive protocol",
 		},
 		{
