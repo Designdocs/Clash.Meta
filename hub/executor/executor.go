@@ -133,6 +133,7 @@ func GetGeneral() *config.General {
 	if auth := authStore.Default.Authenticator(); auth != nil {
 		authenticator = auth.Users()
 	}
+	tlsFragmentEnabled, tlsFragmentDelay := dialer.GetTLSFragment()
 
 	general := &config.General{
 		Inbound: config.Inbound{
@@ -172,6 +173,8 @@ func GetGeneral() *config.General {
 		GeodataLoader:           geodata.LoaderName(),
 		GeositeMatcher:          geodata.SiteMatcherName(),
 		TCPConcurrent:           dialer.GetTcpConcurrent(),
+		TLSFragment:             tlsFragmentEnabled,
+		TLSFragmentDelay:        tlsFragmentDelay,
 		FindProcessMode:         tunnel.FindProcessMode(),
 		Sniffing:                tunnel.IsSniffing(),
 		GlobalClientFingerprint: tlsC.GetGlobalFingerprint(),
@@ -399,6 +402,11 @@ func updateGeneral(general *config.General, logging bool) {
 	dialer.SetTcpConcurrent(general.TCPConcurrent)
 	if logging && general.TCPConcurrent {
 		log.Infoln("Use tcp concurrent")
+	}
+
+	dialer.SetTLSFragment(general.TLSFragment, general.TLSFragmentDelay)
+	if logging && general.TLSFragment {
+		log.Infoln("Use TLS ClientHello fragment, delay %dms", general.TLSFragmentDelay)
 	}
 
 	inbound.SetTfo(general.InboundTfo)

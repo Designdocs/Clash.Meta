@@ -58,6 +58,8 @@ type General struct {
 	GeodataLoader           string                  `json:"geodata-loader"`
 	GeositeMatcher          string                  `json:"geosite-matcher"`
 	TCPConcurrent           bool                    `json:"tcp-concurrent"`
+	TLSFragment             bool                    `json:"tls-fragment"`
+	TLSFragmentDelay        int                     `json:"tls-fragment-delay"`
 	FindProcessMode         process.FindProcessMode `json:"find-process-mode"`
 	Sniffing                bool                    `json:"sniffing"`
 	GlobalClientFingerprint string                  `json:"global-client-fingerprint"`
@@ -428,6 +430,8 @@ type RawConfig struct {
 	GeodataLoader           string                  `yaml:"geodata-loader" json:"geodata-loader"`
 	GeositeMatcher          string                  `yaml:"geosite-matcher" json:"geosite-matcher"`
 	TCPConcurrent           bool                    `yaml:"tcp-concurrent" json:"tcp-concurrent"`
+	TLSFragment             bool                    `yaml:"tls-fragment" json:"tls-fragment"`
+	TLSFragmentDelay        int                     `yaml:"tls-fragment-delay" json:"tls-fragment-delay"`
 	FindProcessMode         process.FindProcessMode `yaml:"find-process-mode" json:"find-process-mode"`
 	GlobalClientFingerprint string                  `yaml:"global-client-fingerprint" json:"global-client-fingerprint"`
 	GlobalUA                string                  `yaml:"global-ua" json:"global-ua"`
@@ -487,6 +491,8 @@ func DefaultRawConfig() *RawConfig {
 		Proxy:             []map[string]any{},
 		ProxyGroup:        []map[string]any{},
 		TCPConcurrent:     false,
+		TLSFragment:       false,
+		TLSFragmentDelay:  0,
 		FindProcessMode:   process.FindProcessStrict,
 		GlobalUA:          "clash.meta/" + C.Version,
 		ETagSupport:       true,
@@ -774,6 +780,8 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 		GeodataLoader:           cfg.GeodataLoader,
 		GeositeMatcher:          cfg.GeositeMatcher,
 		TCPConcurrent:           cfg.TCPConcurrent,
+		TLSFragment:             cfg.TLSFragment,
+		TLSFragmentDelay:        cfg.TLSFragmentDelay,
 		FindProcessMode:         cfg.FindProcessMode,
 		GlobalClientFingerprint: cfg.GlobalClientFingerprint,
 		GlobalUA:                cfg.GlobalUA,

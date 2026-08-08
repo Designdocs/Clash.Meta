@@ -16,6 +16,7 @@ import (
 	"github.com/metacubex/mihomo/component/keepalive"
 	"github.com/metacubex/mihomo/component/mptcp"
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/transport/tlsfragment"
 )
 
 const (
@@ -25,8 +26,13 @@ const (
 	dualStackFallbackTimeout = 300 * time.Millisecond
 )
 
+// maxTLSFragmentDelay keeps a bad config from stalling every handshake.
+const maxTLSFragmentDelay = 1000
+
 var (
-	tcpConcurrent = atomic.NewBool(false)
+	tcpConcurrent    = atomic.NewBool(false)
+	tlsFragment      = atomic.NewBool(false)
+	tlsFragmentDelay = atomic.NewInt32(0)
 )
 
 func SetTcpConcurrent(concurrent bool) {
@@ -37,7 +43,44 @@ func GetTcpConcurrent() bool {
 	return tcpConcurrent.Load()
 }
 
+// SetTLSFragment splits the ClientHello of every TCP connection the core dials,
+// so plaintext-matching middleboxes never see a whole SNI host name. A delay of
+// zero splits at the TLS record layer alone and costs no latency; a positive
+// delay also spaces the records out so they land in separate TCP segments.
+func SetTLSFragment(enabled bool, delayMs int) {
+	if delayMs < 0 {
+		delayMs = 0
+	}
+	if delayMs > maxTLSFragmentDelay {
+		delayMs = maxTLSFragmentDelay
+	}
+	tlsFragmentDelay.Store(int32(delayMs))
+	tlsFragment.Store(enabled)
+}
+
+func GetTLSFragment() (enabled bool, delayMs int) {
+	return tlsFragment.Load(), int(tlsFragmentDelay.Load())
+}
+
+// wrapTLSFragment layers fragmentation over a freshly dialled connection.
+// Connections that never write a ClientHello pass through it untouched.
+func wrapTLSFragment(network string, conn net.Conn) net.Conn {
+	if !tlsFragment.Load() || !strings.HasPrefix(network, "tcp") {
+		return conn
+	}
+	delay := time.Duration(tlsFragmentDelay.Load()) * time.Millisecond
+	return tlsfragment.NewConn(conn, delay)
+}
+
 func DialContext(ctx context.Context, network, address string, options ...Option) (net.Conn, error) {
+	conn, err := dialContextByNetwork(ctx, network, address, options...)
+	if err != nil {
+		return nil, err
+	}
+	return wrapTLSFragment(network, conn), nil
+}
+
+func dialContextByNetwork(ctx context.Context, network, address string, options ...Option) (net.Conn, error) {
 	opt := applyOptions(options...)
 
 	if opt.network == 4 || opt.network == 6 {

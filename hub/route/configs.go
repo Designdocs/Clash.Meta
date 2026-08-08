@@ -55,6 +55,8 @@ type configSchema struct {
 	IPv6              *bool                    `json:"ipv6"`
 	Sniffing          *bool                    `json:"sniffing"`
 	TcpConcurrent     *bool                    `json:"tcp-concurrent"`
+	TLSFragment       *bool                    `json:"tls-fragment"`
+	TLSFragmentDelay  *int                     `json:"tls-fragment-delay"`
 	FindProcessMode   *process.FindProcessMode `json:"find-process-mode"`
 	InterfaceName     *string                  `json:"interface-name"`
 }
@@ -347,6 +349,18 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 
 	if general.TcpConcurrent != nil {
 		dialer.SetTcpConcurrent(*general.TcpConcurrent)
+	}
+
+	if general.TLSFragment != nil || general.TLSFragmentDelay != nil {
+		// Either field may arrive alone, so start from what is running.
+		enabled, delay := dialer.GetTLSFragment()
+		if general.TLSFragment != nil {
+			enabled = *general.TLSFragment
+		}
+		if general.TLSFragmentDelay != nil {
+			delay = *general.TLSFragmentDelay
+		}
+		dialer.SetTLSFragment(enabled, delay)
 	}
 
 	if general.InterfaceName != nil {
