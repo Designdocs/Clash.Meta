@@ -37,6 +37,7 @@ type naiveTestServer struct {
 	mu                sync.Mutex
 	observedAuthority string
 	observedPadding   string
+	observedHeader    http.Header
 	observedEOF       bool
 }
 
@@ -102,6 +103,7 @@ func (server *naiveTestServer) ServeHTTP(writer http.ResponseWriter, request *ht
 	server.mu.Lock()
 	server.observedAuthority = request.Host
 	server.observedPadding = padding
+	server.observedHeader = request.Header.Clone()
 	server.mu.Unlock()
 
 	if server.sendPadding {
@@ -147,15 +149,23 @@ func (server *naiveTestServer) requestPadding() string {
 	return server.observedPadding
 }
 
+func (server *naiveTestServer) requestHeader() http.Header {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.observedHeader
+}
+
 func (server *naiveTestServer) sawEOF() bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	return server.observedEOF
 }
 
+// flusher is spelled out rather than taken from net/http so the HTTP/3 tests,
+// whose stack speaks a different http package, can reuse this writer.
 type flushingWriter struct {
 	writer  io.Writer
-	flusher http.Flusher
+	flusher interface{ Flush() }
 }
 
 func (writer flushingWriter) Write(payload []byte) (int, error) {
@@ -181,6 +191,15 @@ func parseBasicProxyAuth(header string) (username, password string, ok bool) {
 
 func selfSignedCertificate(t *testing.T) tls.Certificate {
 	t.Helper()
+	der, key := selfSignedCertificateMaterial(t)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+// selfSignedCertificateMaterial hands back the raw pieces so both TLS packages
+// in play — crypto/tls here, metacubex/tls under QUIC — can build their own
+// certificate from one implementation.
+func selfSignedCertificateMaterial(t *testing.T) ([]byte, *ecdsa.PrivateKey) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +215,7 @@ func selfSignedCertificate(t *testing.T) tls.Certificate {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	return der, key
 }
 
 func dialTestTunnel(t *testing.T, server *naiveTestServer, username, password, destination string) (net.Conn, error) {
@@ -249,6 +268,24 @@ func TestDialContextTunnelsThroughNaiveServer(t *testing.T) {
 	padding := server.requestPadding()
 	if len(padding) < minHeaderPaddingSize || len(padding) > maxHeaderPaddingSize {
 		t.Fatalf("server saw a %d byte padding header, want [%d, %d]", len(padding), minHeaderPaddingSize, maxHeaderPaddingSize)
+	}
+}
+
+// A CONNECT that announces a Go client or asks for gzip does not look like the
+// Chrome request naive exists to imitate.
+func TestDialContextSendsNoClientHeaders(t *testing.T) {
+	server := newNaiveTestServer(t, "user", "secret", true, []string{http2.NextProtoTLS, alpnHTTP11})
+	tunnel, err := dialTestTunnel(t, server, "user", "secret", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunnel.Close()
+
+	header := server.requestHeader()
+	for _, name := range []string{"User-Agent", "Accept-Encoding"} {
+		if value := header.Get(name); value != "" {
+			t.Fatalf("the server saw %s: %q, want it omitted", name, value)
+		}
 	}
 }
 
