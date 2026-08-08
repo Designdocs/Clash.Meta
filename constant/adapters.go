@@ -51,6 +51,7 @@ const (
 	Tailscale
 	GostRelay
 	ArtX
+	Naive
 )
 
 const (
@@ -231,6 +232,8 @@ func (at AdapterType) String() string {
 		return "GostRelay"
 	case ArtX:
 		return "ArtX"
+	case Naive:
+		return "Naive"
 	case Relay:
 		return "Relay"
 	case Selector:
