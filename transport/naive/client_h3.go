@@ -64,6 +64,10 @@ func DialH3Context(
 	if destination == "" {
 		return nil, errors.New("naive requires a destination authority")
 	}
+	// As on the TCP path, an abort by ctx surfaces as a transport error from
+	// whichever call was in flight. Rewrite it so the caller sees the timeout
+	// or cancellation that actually ended the dial.
+	defer func() { err = describeHandshakeContextEnd(ctx, err) }()
 
 	// DisableCompression keeps `accept-encoding: gzip` off a CONNECT, which is
 	// a header Chrome never puts on one.
@@ -94,6 +98,15 @@ func DialH3Context(
 			_ = transport.Close()
 		}
 	}()
+	// ctx covers the handshake only, and SendRequestHeader and ReadResponse
+	// carry no context of their own: without this abort a server that swallows
+	// the CONNECT would hold the dial far past its deadline. Cancelling the
+	// stream fails whichever of the two is in flight.
+	stopOnContextDone := context.AfterFunc(ctx, func() {
+		stream.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+		stream.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+	})
+	defer stopOnContextDone()
 
 	if err = stream.SendRequestHeader(buildH3ConnectRequest(config, destination)); err != nil {
 		return nil, err
@@ -104,6 +117,9 @@ func DialH3Context(
 	}
 	if response.StatusCode != http.StatusOK {
 		return nil, connectStatusError(response.StatusCode)
+	}
+	if !stopOnContextDone() {
+		return nil, context.Cause(ctx)
 	}
 	return &h3TunnelConn{
 		stream:         stream,

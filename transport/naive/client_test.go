@@ -364,6 +364,69 @@ func TestDialContextRequiresH2ALPN(t *testing.T) {
 	}
 }
 
+// A server that never answers exercises the path the 5s dial context enforces
+// in production: the context ends mid-handshake, the AfterFunc closes the raw
+// connection, and the in-flight I/O surfaces "use of closed network
+// connection". That symptom must not be the story the caller gets.
+func TestDialContextNamesTheContextEndMidHandshake(t *testing.T) {
+	tests := []struct {
+		name       string
+		endContext func(context.Context) (context.Context, context.CancelFunc)
+		wantIs     error
+		wantText   string
+	}{
+		{
+			name: "deadline",
+			endContext: func(parent context.Context) (context.Context, context.CancelFunc) {
+				return context.WithTimeout(parent, 100*time.Millisecond)
+			},
+			wantIs:   context.DeadlineExceeded,
+			wantText: "naive handshake timed out",
+		},
+		{
+			name: "cancel",
+			endContext: func(parent context.Context) (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(parent)
+				timer := time.AfterFunc(100*time.Millisecond, cancel)
+				return ctx, func() { timer.Stop(); cancel() }
+			},
+			wantIs:   context.Canceled,
+			wantText: "naive handshake canceled",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer server.Close()
+			// Drain the ClientHello so the handshake blocks waiting on a
+			// ServerHello that never comes, exactly like a lossy link.
+			go io.Copy(io.Discard, server)
+
+			ctx, cancel := test.endContext(context.Background())
+			defer cancel()
+			tunnel, err := DialContext(ctx, client, ClientConfig{
+				Username: "user",
+				Password: "secret",
+				TLSConfig: &vmess.TLSConfig{
+					Host:              "naive.test",
+					SkipCertVerify:    true,
+					ClientFingerprint: "chrome",
+				},
+			}, "example.com:443")
+			if err == nil {
+				tunnel.Close()
+				t.Fatal("a handshake cut off by its context must fail the dial")
+			}
+			if !errors.Is(err, test.wantIs) {
+				t.Fatalf("got %v, want errors.Is %v", err, test.wantIs)
+			}
+			if !strings.Contains(err.Error(), test.wantText) {
+				t.Fatalf("got %v, want an error containing %q", err, test.wantText)
+			}
+		})
+	}
+}
+
 func TestDialContextValidatesArguments(t *testing.T) {
 	tests := []struct {
 		name        string
