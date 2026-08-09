@@ -49,6 +49,12 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	}()
 	// ctx covers the handshake only. An established tunnel outlives the dial,
 	// so it gets its own context below rather than dying with this one.
+	//
+	// When ctx ends, the AfterFunc below kills the handshake by closing raw,
+	// so the in-flight I/O reports a closed connection — a symptom of the
+	// abort, not its cause. Rewrite the error so the caller sees the timeout
+	// or cancellation that actually ended the dial.
+	defer func() { err = describeHandshakeContextEnd(ctx, err) }()
 	stopOnContextDone := context.AfterFunc(ctx, func() { _ = raw.Close() })
 	defer stopOnContextDone()
 
@@ -95,7 +101,7 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	padding := newPaddingState(response.Header.Get(paddingHeader) != "")
 	if !stopOnContextDone() {
 		_ = response.Body.Close()
-		return nil, ctx.Err()
+		return nil, context.Cause(ctx)
 	}
 	return &tunnelConn{
 		Conn:     tlsConnection,
@@ -160,6 +166,25 @@ func handshakeTLS(ctx context.Context, raw net.Conn, config ClientConfig) (net.C
 
 func basicAuthorization(username, password string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password))
+}
+
+// describeHandshakeContextEnd names the dial context's end as the failure when
+// the handshake died with it. The wrapped cause keeps errors.Is working for
+// context.DeadlineExceeded and context.Canceled; the original error stays as a
+// detail because it says which handshake step was in flight.
+func describeHandshakeContextEnd(ctx context.Context, err error) error {
+	cause := context.Cause(ctx)
+	if err == nil || cause == nil {
+		return err
+	}
+	label := "naive handshake canceled"
+	if errors.Is(cause, context.DeadlineExceeded) {
+		label = "naive handshake timed out"
+	}
+	if errors.Is(err, cause) {
+		return fmt.Errorf("%s: %w", label, cause)
+	}
+	return fmt.Errorf("%s: %w (%v)", label, cause, err)
 }
 
 func connectStatusError(statusCode int) error {

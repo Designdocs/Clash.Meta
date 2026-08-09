@@ -30,10 +30,26 @@ type naiveH3TestServer struct {
 	sendPadding bool
 
 	mu                sync.Mutex
+	stallConnect      bool
 	observedAuthority string
 	observedPadding   string
 	observedHeader    http.Header
 	observedEOF       bool
+}
+
+// stallEveryConnect makes the server sit on CONNECT requests without ever
+// answering, the way a naive server behind a lossy link looks to a client
+// whose dial context is about to expire.
+func (server *naiveH3TestServer) stallEveryConnect() {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.stallConnect = true
+}
+
+func (server *naiveH3TestServer) shouldStallConnect() bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.stallConnect
 }
 
 func newNaiveH3TestServer(t *testing.T, username, password string, sendPadding bool) *naiveH3TestServer {
@@ -71,6 +87,10 @@ func (server *naiveH3TestServer) address() net.Addr {
 func (server *naiveH3TestServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodConnect {
 		writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if server.shouldStallConnect() {
+		<-request.Context().Done()
 		return
 	}
 	padding := request.Header.Get(paddingHeader)
@@ -327,6 +347,35 @@ func TestDialH3ContextCloseReleasesTheTransport(t *testing.T) {
 	}
 	if _, err := tunnel.Write([]byte("after close")); err == nil {
 		t.Fatal("writing to a closed tunnel must fail")
+	}
+}
+
+// A server that swallows the CONNECT without answering must not let the dial
+// outlive its context: ReadResponse carries no context of its own, so without
+// an explicit abort the handshake would hang far past the dial deadline. And
+// when it is aborted, the caller must see the timeout, not a stream error.
+func TestDialH3ContextNamesTheContextEndMidHandshake(t *testing.T) {
+	server := newNaiveH3TestServer(t, "user", "secret", true)
+	server.stallEveryConnect()
+	quicConnection, closeTransport := dialTestQUICConnection(t, server)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	tunnel, err := DialH3Context(ctx, quicConnection, testH3ClientConfig("user", "secret"), "example.com:443", closeTransport)
+	if err == nil {
+		tunnel.Close()
+		t.Fatal("a handshake cut off by its context must fail the dial")
+	}
+	_ = closeTransport()
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("the dial outlived its context by %v", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v, want errors.Is context.DeadlineExceeded", err)
+	}
+	if !strings.Contains(err.Error(), "naive handshake timed out") {
+		t.Fatalf("got %v, want an error containing %q", err, "naive handshake timed out")
 	}
 }
 
