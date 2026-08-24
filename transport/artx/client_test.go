@@ -81,6 +81,103 @@ func TestArtXTLSHandshakeAndConnection(t *testing.T) {
 	}
 }
 
+func TestWireV1ClientAdvertisesCompiledFlowControlButRemainsLegacyWithoutServerCredit(t *testing.T) {
+	legacyWindowFilled := make(chan struct{})
+	releaseCredit := make(chan struct{})
+	connection, serverDone := dialTestConnectionWithConfig(t, context.Background(), ClientConfig{
+		Password: "secret", ProfileVersion: 1,
+		TLSConfig: &vmess.TLSConfig{Host: "example.com", SkipCertVerify: true, ClientFingerprint: "chrome"},
+	}, []serverAction{releaseOneByteAfterLegacyWindow(legacyWindowFilled, releaseCredit)})
+
+	payload := bytes.Repeat([]byte("x"), int(InitialStreamWindow)+1)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := connection.Write(payload)
+		writeDone <- err
+	}()
+
+	select {
+	case <-legacyWindowFilled:
+	case <-time.After(time.Second):
+		t.Fatal("client did not fill the legacy window")
+	}
+	select {
+	case err := <-writeDone:
+		t.Fatalf("write exceeded the legacy window without server credit: %v", err)
+	default:
+	}
+	close(releaseCredit)
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("write did not resume after legacy server WINDOW_UPDATE")
+	}
+	_ = connection.Close()
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWireV1FlowControlClientUsesServerCreditBeyondLegacyWindow(t *testing.T) {
+	connection, serverDone := dialTestConnectionWithConfig(t, context.Background(), ClientConfig{
+		Password: "secret", ProfileVersion: 1,
+		TLSConfig: &vmess.TLSConfig{Host: "example.com", SkipCertVerify: true, ClientFingerprint: "chrome"},
+	}, []serverAction{grantFlowControlCreditAndRead(2 * int(InitialStreamWindow))})
+
+	payload := bytes.Repeat([]byte("x"), 2*int(InitialStreamWindow))
+	if _, err := connection.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	_ = connection.Close()
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWireV1FlowControlClientRejectsCreditBeyondNegotiatedLimit(t *testing.T) {
+	connection, serverDone := dialTestConnectionWithConfig(t, context.Background(), ClientConfig{
+		Password: "secret", ProfileVersion: 1,
+		TLSConfig: &vmess.TLSConfig{Host: "example.com", SkipCertVerify: true, ClientFingerprint: "chrome"},
+	}, []serverAction{overflowFlowControlCredit})
+
+	_, err := connection.Read(make([]byte, 1))
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("window overflow")) {
+		t.Fatalf("overflow error = %v, want negotiated window overflow", err)
+	}
+	_ = connection.Close()
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWireV1PacketClientDoesNotAdvertiseTCPFlowControl(t *testing.T) {
+	clientRaw, serverRaw := net.Pipe()
+	serverDone := make(chan error, 1)
+	serverConfig := testTLSConfig(t, tls.VersionTLS13, tls.VersionTLS13)
+	go func() {
+		serverDone <- runTestServerWithFlowControl(serverRaw, serverConfig, 0, FrameUDPAssoc, []serverAction{readClientFin})
+	}()
+
+	remote := &net.UDPAddr{IP: net.ParseIP("192.0.2.53"), Port: 53}
+	connection, err := DialPacketContext(context.Background(), clientRaw, ClientConfig{
+		Password: "secret", ProfileVersion: 1,
+		TLSConfig: &vmess.TLSConfig{Host: "example.com", SkipCertVerify: true, ClientFingerprint: "chrome"},
+	}, Destination{Host: "dns.example", Port: 53}, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeStatsCountUnexpectedTransportClose(t *testing.T) {
 	unexpectedDisconnects.Store(0)
 	client, server := net.Pipe()
@@ -369,6 +466,16 @@ func TestArtXReceiveWindowAccounting(t *testing.T) {
 	}
 	if err := window.restore(1); err == nil {
 		t.Fatal("receive-window over-replenishment accepted")
+	}
+}
+
+func TestWireV1CompiledFlowControlLimits(t *testing.T) {
+	limits := flowControlLimitsForScale(maxFlowControlWindowScale)
+	if limits.stream != 4<<20 {
+		t.Fatalf("stream limit = %d, want %d", limits.stream, 4<<20)
+	}
+	if limits.connection != 16<<20 {
+		t.Fatalf("connection limit = %d, want %d", limits.connection, 16<<20)
 	}
 }
 
@@ -696,6 +803,17 @@ func targetFinThenReadClient(connection net.Conn) error {
 	return nil
 }
 
+func readClientFin(connection net.Conn) error {
+	frame, err := ReadFrame(connection)
+	if err != nil {
+		return err
+	}
+	if frame.Type != FrameFin {
+		return errors.New("client FIN missing")
+	}
+	return nil
+}
+
 func dialTestConnection(t *testing.T, actions []serverAction) (net.Conn, <-chan error) {
 	t.Helper()
 	return dialTestConnectionContext(t, context.Background(), actions)
@@ -703,14 +821,25 @@ func dialTestConnection(t *testing.T, actions []serverAction) (net.Conn, <-chan 
 
 func dialTestConnectionContext(t *testing.T, ctx context.Context, actions []serverAction) (net.Conn, <-chan error) {
 	t.Helper()
+	return dialTestConnectionWithConfig(t, ctx, ClientConfig{
+		Password: "secret", ProfileVersion: 1,
+		TLSConfig: &vmess.TLSConfig{Host: "example.com", SkipCertVerify: true, ClientFingerprint: "chrome"},
+	}, actions)
+}
+
+func dialTestConnectionWithConfig(t *testing.T, ctx context.Context, config ClientConfig, actions []serverAction) (net.Conn, <-chan error) {
+	t.Helper()
 	clientRaw, serverRaw := net.Pipe()
 	serverDone := make(chan error, 1)
 	serverConfig := testTLSConfig(t, tls.VersionTLS13, tls.VersionTLS13)
-	go func() { serverDone <- runTestServer(serverRaw, serverConfig, actions) }()
-	connection, err := DialContext(ctx, clientRaw, ClientConfig{
-		Password: "secret", ProfileVersion: 1,
-		TLSConfig: &vmess.TLSConfig{Host: "example.com", SkipCertVerify: true, ClientFingerprint: "chrome"},
-	}, Destination{Host: "example.com", Port: 443})
+	expectedWindowScale := uint32(0)
+	if normalizedWireVersion(config.WireVersion) == 1 {
+		expectedWindowScale = maxFlowControlWindowScale
+	}
+	go func() {
+		serverDone <- runTestServerWithFlowControl(serverRaw, serverConfig, expectedWindowScale, FrameTCPSyn, actions)
+	}()
+	connection, err := DialContext(ctx, clientRaw, config, Destination{Host: "example.com", Port: 443})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,6 +847,10 @@ func dialTestConnectionContext(t *testing.T, ctx context.Context, actions []serv
 }
 
 func runTestServer(raw net.Conn, config *tls.Config, actions []serverAction) error {
+	return runTestServerWithFlowControl(raw, config, maxFlowControlWindowScale, FrameTCPSyn, actions)
+}
+
+func runTestServerWithFlowControl(raw net.Conn, config *tls.Config, expectedWindowScale uint32, expectedOpenFrame byte, actions []serverAction) error {
 	defer raw.Close()
 	connection := tls.Server(raw, config)
 	if err := connection.Handshake(); err != nil {
@@ -744,11 +877,25 @@ func runTestServer(raw net.Conn, config *tls.Config, actions []serverAction) err
 	if err != nil || settings.Type != FrameSettings || settings.StreamID != 0 {
 		return errors.New("client SETTINGS required")
 	}
-	syn, err := ReadFrame(connection)
-	if err != nil || syn.Type != FrameTCPSyn || syn.StreamID != 1 {
-		return errors.New("client TCP_SYN required")
+	parsedSettings, err := ParseSettings(settings.Payload)
+	if err != nil {
+		return err
 	}
-	if _, err := ParseDestination(syn.Payload); err != nil {
+	if err := parsedSettings.Validate(1); err != nil {
+		return err
+	}
+	windowScale, advertised, err := findRawSetting(settings.Payload, settingWindowScaleCapability)
+	if err != nil {
+		return err
+	}
+	if advertised != (expectedWindowScale != 0) || windowScale != expectedWindowScale {
+		return errors.New("unexpected client flow-control capability")
+	}
+	open, err := ReadFrame(connection)
+	if err != nil || open.Type != expectedOpenFrame || open.StreamID != 1 {
+		return errors.New("expected client open frame missing")
+	}
+	if _, err := ParseDestination(open.Payload); err != nil {
 		return err
 	}
 	for _, action := range actions {
@@ -760,6 +907,107 @@ func runTestServer(raw net.Conn, config *tls.Config, actions []serverAction) err
 		_, err = io.Copy(io.Discard, connection)
 	}
 	return err
+}
+
+func findRawSetting(payload []byte, key uint16) (uint32, bool, error) {
+	if len(payload)%6 != 0 {
+		return 0, false, errors.New("invalid SETTINGS payload length")
+	}
+	for len(payload) > 0 {
+		if binary.BigEndian.Uint16(payload[:2]) == key {
+			return binary.BigEndian.Uint32(payload[2:6]), true, nil
+		}
+		payload = payload[6:]
+	}
+	return 0, false, nil
+}
+
+func releaseOneByteAfterLegacyWindow(filled chan<- struct{}, release <-chan struct{}) serverAction {
+	return func(connection net.Conn) error {
+		received := 0
+		for received < int(InitialStreamWindow) {
+			frame, err := ReadFrame(connection)
+			if err != nil {
+				return err
+			}
+			if frame.Type != FrameData {
+				return errors.New("client DATA required")
+			}
+			received += len(frame.Payload)
+		}
+		if received != int(InitialStreamWindow) {
+			return errors.New("client exceeded legacy credit before WINDOW_UPDATE")
+		}
+		close(filled)
+		<-release
+		payload := make([]byte, 4)
+		binary.BigEndian.PutUint32(payload, 1)
+		if err := WriteFrame(connection, FrameWindowUpdate, 0, payload); err != nil {
+			return err
+		}
+		if err := WriteFrame(connection, FrameWindowUpdate, 1, payload); err != nil {
+			return err
+		}
+		frame, err := ReadFrame(connection)
+		if err != nil {
+			return err
+		}
+		if frame.Type != FrameData || len(frame.Payload) != 1 {
+			return errors.New("client did not resume with the granted byte")
+		}
+		return nil
+	}
+}
+
+func grantFlowControlCreditAndRead(want int) serverAction {
+	return func(connection net.Conn) error {
+		for _, update := range []struct {
+			streamID  uint32
+			increment uint32
+		}{
+			{streamID: 0, increment: (InitialConnectionWindow << maxFlowControlWindowScale) - InitialConnectionWindow},
+			{streamID: 1, increment: (InitialStreamWindow << maxFlowControlWindowScale) - InitialStreamWindow},
+		} {
+			payload := make([]byte, 4)
+			binary.BigEndian.PutUint32(payload, update.increment)
+			if err := WriteFrame(connection, FrameWindowUpdate, update.streamID, payload); err != nil {
+				return err
+			}
+		}
+		received := 0
+		for received < want {
+			frame, err := ReadFrame(connection)
+			if err != nil {
+				return err
+			}
+			if frame.Type != FrameData {
+				return errors.New("client DATA required")
+			}
+			received += len(frame.Payload)
+		}
+		if received != want {
+			return errors.New("client sent unexpected DATA length")
+		}
+		return nil
+	}
+}
+
+func overflowFlowControlCredit(connection net.Conn) error {
+	for _, update := range []struct {
+		streamID  uint32
+		increment uint32
+	}{
+		{streamID: 0, increment: (InitialConnectionWindow << maxFlowControlWindowScale) - InitialConnectionWindow},
+		{streamID: 1, increment: (InitialStreamWindow << maxFlowControlWindowScale) - InitialStreamWindow},
+		{streamID: 1, increment: 1},
+	} {
+		payload := make([]byte, 4)
+		binary.BigEndian.PutUint32(payload, update.increment)
+		if err := WriteFrame(connection, FrameWindowUpdate, update.streamID, payload); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func readRawAuth(reader io.Reader) ([]byte, error) {

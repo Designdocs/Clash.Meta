@@ -33,11 +33,13 @@ const (
 )
 
 const (
-	settingMaxConcurrentStreams uint16 = 0x0001
-	settingInitialStreamWindow  uint16 = 0x0002
-	settingInitialConnWindow    uint16 = 0x0003
-	settingProfileVersion       uint16 = 0x0005
-	settingSessionReuse         uint16 = 0x0007
+	settingMaxConcurrentStreams  uint16 = 0x0001
+	settingInitialStreamWindow   uint16 = 0x0002
+	settingInitialConnWindow     uint16 = 0x0003
+	settingProfileVersion        uint16 = 0x0005
+	settingSessionReuse          uint16 = 0x0007
+	settingWindowScaleCapability uint16 = 0x0008
+	maxFlowControlWindowScale    uint32 = 4
 )
 
 type Frame struct {
@@ -191,6 +193,16 @@ func (settings Settings) MarshalBinary() []byte {
 	if settings.SessionReuse != 0 {
 		settingsEntry(payload[24:30], settingSessionReuse, settings.SessionReuse)
 	}
+	return payload
+}
+
+func marshalClientSettings(wireVersion, profileVersion uint32, advertiseFlowControl bool) []byte {
+	payload := settingsForWire(wireVersion, profileVersion).MarshalBinary()
+	if wireVersion != 1 || !advertiseFlowControl {
+		return payload
+	}
+	payload = append(payload, make([]byte, 6)...)
+	settingsEntry(payload[len(payload)-6:], settingWindowScaleCapability, maxFlowControlWindowScale)
 	return payload
 }
 

@@ -69,6 +69,33 @@ func TestArtXCanonicalVectors(t *testing.T) {
 	assertHex(t, encodedDatagram, "160000000100000400021234")
 }
 
+func TestClientSettingsAdvertiseCompiledWindowScaleOnlyForWireV1TCP(t *testing.T) {
+	tests := []struct {
+		name                 string
+		wire                 uint32
+		advertiseFlowControl bool
+		advertised           bool
+		wantScale            uint32
+	}{
+		{name: "wire-v1 TCP", wire: 1, advertiseFlowControl: true, advertised: true, wantScale: maxFlowControlWindowScale},
+		{name: "wire-v1 UDP", wire: 1},
+		{name: "wire-v2", wire: 2, advertiseFlowControl: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := marshalClientSettings(test.wire, 1, test.advertiseFlowControl)
+			scale, advertised, err := findRawSetting(payload, settingWindowScaleCapability)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if advertised != test.advertised || scale != test.wantScale {
+				t.Fatalf("window scale = %d, %v; want %d, %v", scale, advertised, test.wantScale, test.advertised)
+			}
+		})
+	}
+}
+
 func TestArtXProtocolValidation(t *testing.T) {
 	want, _ := MarshalFrame(FrameData, 1, []byte("short-write"))
 	writer := &shortWriter{}

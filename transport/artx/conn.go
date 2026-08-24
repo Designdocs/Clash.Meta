@@ -44,15 +44,20 @@ func NewConn(connection net.Conn) *Conn {
 }
 
 func newConn(connection net.Conn, readFrame func() (Frame, error), writeFrame func(byte, uint32, []byte) error) *Conn {
+	return newConnWithWindowScale(connection, readFrame, writeFrame, 0)
+}
+
+func newConnWithWindowScale(connection net.Conn, readFrame func() (Frame, error), writeFrame func(byte, uint32, []byte) error, windowScale uint32) *Conn {
 	if readFrame == nil {
 		readFrame = func() (Frame, error) { return ReadFrame(connection) }
 	}
+	limits := flowControlLimitsForScale(windowScale)
 	connectionContext, cancel := context.WithCancel(context.Background())
 	artxConnection := &Conn{
 		Conn: connection, ctx: connectionContext, cancel: cancel,
-		reader: newReceiveBuffer(InitialStreamWindow),
+		reader: newReceiveBuffer(limits.stream),
 		frames: &lockedFrameWriter{writer: connection, writeFrame: writeFrame}, readFrame: readFrame,
-		windows: newSendWindow(), receive: newReceiveWindow(),
+		windows: newSendWindowWithLimits(limits), receive: newReceiveWindowWithLimits(limits),
 		control: make(chan controlWrite, 4), updateWake: make(chan struct{}, 1),
 		readDone: make(chan struct{}), controlDone: make(chan struct{}),
 	}
@@ -360,12 +365,21 @@ type sendWindow struct {
 	mu         sync.Mutex
 	stream     uint32
 	connection uint32
+	maxStream  uint32
+	maxConn    uint32
 	changed    chan struct{}
 	deadline   time.Time
 }
 
 func newSendWindow() *sendWindow {
-	return &sendWindow{stream: InitialStreamWindow, connection: InitialConnectionWindow, changed: make(chan struct{})}
+	return newSendWindowWithLimits(flowControlLimitsForScale(0))
+}
+
+func newSendWindowWithLimits(limits flowControlLimits) *sendWindow {
+	return &sendWindow{
+		stream: InitialStreamWindow, connection: InitialConnectionWindow,
+		maxStream: limits.stream, maxConn: limits.connection, changed: make(chan struct{}),
+	}
 }
 
 func (window *sendWindow) waitConsume(ctx context.Context, amount int) error {
@@ -427,12 +441,12 @@ func (window *sendWindow) update(streamID, increment uint32) error {
 	defer window.mu.Unlock()
 	switch streamID {
 	case 0:
-		if increment > InitialConnectionWindow-window.connection {
+		if increment > window.maxConn-window.connection {
 			return errors.New("artx connection window overflow")
 		}
 		window.connection += increment
 	case 1:
-		if increment > InitialStreamWindow-window.stream {
+		if increment > window.maxStream-window.stream {
 			return errors.New("artx stream window overflow")
 		}
 		window.stream += increment
@@ -458,10 +472,19 @@ type receiveWindow struct {
 	mu         sync.Mutex
 	stream     uint32
 	connection uint32
+	maxStream  uint32
+	maxConn    uint32
 }
 
 func newReceiveWindow() *receiveWindow {
-	return &receiveWindow{stream: InitialStreamWindow, connection: InitialConnectionWindow}
+	return newReceiveWindowWithLimits(flowControlLimitsForScale(0))
+}
+
+func newReceiveWindowWithLimits(limits flowControlLimits) *receiveWindow {
+	return &receiveWindow{
+		stream: limits.stream, connection: limits.connection,
+		maxStream: limits.stream, maxConn: limits.connection,
+	}
 }
 
 func (window *receiveWindow) consume(amount int) error {
@@ -478,12 +501,27 @@ func (window *receiveWindow) consume(amount int) error {
 func (window *receiveWindow) restore(increment uint32) error {
 	window.mu.Lock()
 	defer window.mu.Unlock()
-	if increment > InitialStreamWindow-window.stream || increment > InitialConnectionWindow-window.connection {
+	if increment > window.maxStream-window.stream || increment > window.maxConn-window.connection {
 		return errors.New("artx receive window overflow")
 	}
 	window.stream += increment
 	window.connection += increment
 	return nil
+}
+
+type flowControlLimits struct {
+	stream     uint32
+	connection uint32
+}
+
+func flowControlLimitsForScale(windowScale uint32) flowControlLimits {
+	if windowScale == maxFlowControlWindowScale {
+		return flowControlLimits{
+			stream:     InitialStreamWindow << maxFlowControlWindowScale,
+			connection: InitialConnectionWindow << maxFlowControlWindowScale,
+		}
+	}
+	return flowControlLimits{stream: InitialStreamWindow, connection: InitialConnectionWindow}
 }
 
 type receiveBuffer struct {

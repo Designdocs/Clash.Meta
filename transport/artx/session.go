@@ -55,7 +55,7 @@ func (connection *sessionPipeConn) Close() error {
 
 func NewClientSession(ctx context.Context, raw net.Conn, config ClientConfig) (*ClientSession, error) {
 	config.WireVersion = 2
-	connection, err := establishSession(ctx, raw, config, nil)
+	connection, err := establishSession(ctx, raw, config, nil, false)
 	if err != nil {
 		return nil, err
 	}
