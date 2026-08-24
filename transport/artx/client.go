@@ -58,7 +58,11 @@ func DialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 		closeR0Hook(hook)
 		return nil, err
 	}
-	return wrapR0Connection(NewConn(connection), hook), nil
+	windowScale := uint32(0)
+	if wireVersion == 1 {
+		windowScale = maxFlowControlWindowScale
+	}
+	return wrapR0Connection(newConnWithWindowScale(connection, nil, nil, windowScale), hook), nil
 }
 
 func DialPacketContext(ctx context.Context, raw net.Conn, config ClientConfig, destination Destination, remote net.Addr) (*PacketConn, error) {
@@ -79,7 +83,8 @@ func dialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	if err := destination.Validate(); err != nil {
 		return nil, err
 	}
-	connection, err = establishSession(ctx, raw, config, hook)
+	advertiseFlowControl := openFrame == FrameTCPSyn
+	connection, err = establishSession(ctx, raw, config, hook, advertiseFlowControl)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +96,7 @@ func dialContext(ctx context.Context, raw net.Conn, config ClientConfig, destina
 	return connection, nil
 }
 
-func establishSession(ctx context.Context, raw net.Conn, config ClientConfig, hook r0Hook) (connection net.Conn, err error) {
+func establishSession(ctx context.Context, raw net.Conn, config ClientConfig, hook r0Hook, advertiseFlowControl bool) (connection net.Conn, err error) {
 	wireVersion := normalizedWireVersion(config.WireVersion)
 	if wireVersion != 1 && wireVersion != 2 {
 		return nil, fmt.Errorf("artx unsupported wire version: %d", wireVersion)
@@ -140,7 +145,8 @@ func establishSession(ctx context.Context, raw net.Conn, config ClientConfig, ho
 		return nil, err
 	}
 	emitR0Event(hook, r0PhaseSetup, r0EventProofVerified, 1)
-	if err := writeFrame(tlsConnection, wireVersion, FrameSettings, 0, settingsForWire(wireVersion, config.ProfileVersion).MarshalBinary()); err != nil {
+	clientSettings := marshalClientSettings(wireVersion, config.ProfileVersion, advertiseFlowControl)
+	if err := writeFrame(tlsConnection, wireVersion, FrameSettings, 0, clientSettings); err != nil {
 		return nil, err
 	}
 	if !stopContextClose() {
