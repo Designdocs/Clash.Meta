@@ -161,7 +161,7 @@ func (naive *Naive) dialHTTP3(ctx context.Context, metadata *C.Metadata) (_ C.Co
 		MaxIncomingStreams: -1,
 		KeepAlivePeriod:    naiveH3KeepAlivePeriod,
 		MaxIdleTimeout:     naiveH3IdleTimeout,
-	}, false)
+	}, common.DialQuicOption{})
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", naive.addr, err)
 	}

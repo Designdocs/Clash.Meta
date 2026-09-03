@@ -156,7 +156,7 @@ func (artx *ArtX) listenNativeUDP(ctx context.Context, destination artxTransport
 	packetConn, quicConn, err := common.DialQuic(ctx, artx.addr, artx.DialOptions(), artx.dialer, tlsConfig, &quic.Config{
 		EnableDatagrams:   true,
 		InitialPacketSize: 1242,
-	}, false)
+	}, common.DialQuicOption{})
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func (artx *ArtX) listenNativeUDP(ctx context.Context, destination artxTransport
 		_ = closeTransport()
 		return nil, err
 	}
-	return newPacketConn(connection, artx), nil
+	return NewPacketConn(connection, artx), nil
 }
 
 func (artx *ArtX) nativeUDPAuthority() string {
@@ -221,7 +221,7 @@ func (artx *ArtX) ListenPacketContext(ctx context.Context, metadata *C.Metadata)
 		if err != nil {
 			return nil, err
 		}
-		return newPacketConn(
+		return NewPacketConn(
 			artxTransport.ObserveLifecyclePacketConn(connection, metadata.SrcPort), artx,
 		), nil
 	}
@@ -240,7 +240,7 @@ func (artx *ArtX) ListenPacketContext(ctx context.Context, metadata *C.Metadata)
 	if err != nil {
 		return nil, err
 	}
-	return newPacketConn(
+	return NewPacketConn(
 		artxTransport.ObserveLifecyclePacketConn(packetConnection, metadata.SrcPort), artx,
 	), nil
 }
